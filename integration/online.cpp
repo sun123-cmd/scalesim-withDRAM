@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <fstream>
@@ -727,7 +728,22 @@ public:
   }
   void run(const std::string &path) {
     bool measuring = warmup == 0;
+    const auto started = std::chrono::steady_clock::now();
+    auto last_progress = started;
     while (completed < warmup + measured) {
+      if (cycle % 1000000 == 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress >= std::chrono::seconds(15)) {
+          std::cerr << "online_progress cycle=" << cycle << " completed=" << completed
+                    << " target=" << warmup + measured << " elapsed_seconds="
+                    << std::chrono::duration<double>(now - started).count();
+          for (const auto &stage : stages)
+            std::cerr << " " << stage.name << ".op=" << stage.op_index
+                      << "/" << stage.operations.size();
+          std::cerr << std::endl;
+          last_progress = now;
+        }
+      }
       if (cycle >= max_cycles)
         throw std::runtime_error("Online simulation exceeded max_cycles");
       issued = 0;
