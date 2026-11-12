@@ -170,7 +170,7 @@ class OnlineNativeAcceptance(unittest.TestCase):
         self.assertEqual(counts[0], counts[1])
 
     def test_target_controller_counts(self):
-        for bandwidth, expected in ((136.6, 2), (819.0, 12)):
+        for bandwidth, expected in ((136.6, 2), (819.0, 16)):
             config = fixture_config(target_gbps=bandwidth, warmup=0, measure=2, replicas=1)
             metadata = config['memory_metadata']
             self.assertEqual(metadata['controller_count'], expected)
@@ -178,6 +178,9 @@ class OnlineNativeAcceptance(unittest.TestCase):
             result, _ = self.run_config(config)
             controllers = result['memory_system']['controller']
             self.assertEqual(len(controllers), expected)
+            if bandwidth == 819.0:
+                self.assertEqual(config['memory_system']['controllers'][0]['dram']['impl'], 'HBM3')
+                self.assertAlmostEqual(result['online']['tCK_ns'], metadata['tCK_ps'] / 1000)
 
     def test_baseline_serializes_stage_resources(self):
         _, events = self.run_config(fixture_config(mode='baseline', replicas=1))

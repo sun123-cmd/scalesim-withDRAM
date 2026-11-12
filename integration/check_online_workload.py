@@ -127,6 +127,19 @@ class OnlineWorkload(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'SRAM'):
             self.compile(Hardware(core_sram_bytes=1024))
 
+    def test_shared_sram_changes_tile_capacity_without_changing_work(self):
+        table = {shape: sum(shape) for shape in all_tile_shapes()}
+        schedule = Schedule(b=10)
+        private = Hardware(32, core_sram_bytes=1 << 18, shared_sram_bytes=0)
+        pooled = Hardware(32, core_sram_bytes=1 << 18, shared_sram_bytes=64 << 20)
+        first = compile_online_program(private, schedule, table, mode='baseline')
+        second = compile_online_program(pooled, schedule, table, mode='baseline')
+        self.assertGreater(second['online']['stages'][0]['maximum_m_tile'],
+                           first['online']['stages'][0]['maximum_m_tile'])
+        for left, right in zip(first['online']['stages'], second['online']['stages']):
+            self.assertEqual([(op['m'], op['n'], op['k'], op['count']) for op in left['operations']],
+                             [(op['m'], op['n'], op['k'], op['count']) for op in right['operations']])
+
     def test_whole_chip_baseline_accepts_small_replica_core_partitions(self):
         table = {shape: sum(shape) for shape in all_tile_shapes()}
         data = compile_online_program(Hardware(8), Schedule(b=2, replicas=4),
@@ -203,7 +216,7 @@ class OnlineWorkload(unittest.TestCase):
         for stage in data['online']['stages']:
             for op in stage['operations']:
                 footprint = 2 * (op['m_tile'] * 32 + 32 * 32) * 2 + op['m_tile'] * 32 * 4
-                self.assertLessEqual(footprint, stage['core_sram_bytes'])
+                self.assertLessEqual(footprint, stage.get('lane_sram_bytes', stage['core_sram_bytes']))
 
     def test_dit_executes_real_layer_order_and_weight_offsets(self):
         data = self.compile()
@@ -265,14 +278,26 @@ class OnlineWorkload(unittest.TestCase):
             import ramulator
         except ImportError:
             self.skipTest('Ramulator Python configuration package required')
-        for target, count in ((136.6, 2), (819.0, 12)):
+        for target, count in ((136.6, 2), (819.0, 16)):
             data = target_memory_config(target)
             metadata = data['memory_metadata']
             self.assertEqual(metadata['controller_count'], count)
-            self.assertLess(metadata['relative_peak_error'], .001)
+            self.assertLess(metadata['relative_peak_error'], .002)
             self.assertGreaterEqual(metadata['physical_capacity_bytes'], LOGICAL_CAPACITY)
             self.assertEqual(len(data['memory_system']['controllers']), count)
             self.assertEqual(data['memory_system']['channel_mapper']['impl'], 'ModuloInterleave')
+            controller = data['memory_system']['controllers'][0]
+            protocol = 'HBM3' if target == 819.0 else 'LPDDR5'
+            self.assertEqual(controller['dram']['impl'], protocol)
+            self.assertEqual(metadata['protocol'], protocol)
+            if protocol == 'HBM3':
+                self.assertEqual(controller['impl'], 'HBM34')
+                self.assertEqual(controller['refresh_manager']['impl'], 'HBM34PerBankRefresh')
+                self.assertEqual(metadata['physical_capacity_bytes'], LOGICAL_CAPACITY)
+                self.assertEqual(metadata['timing_overrides'], {})
+                timings = dict(zip(ramulator.dram.HBM3.timing_params, controller['dram']['timing']))
+                self.assertEqual(timings['tCK_ps'], metadata['tCK_ps'])
+                self.assertAlmostEqual(metadata['effective_peak_gbps'], 16 * 2 * 32 * 1000 / (timings['nBL'] * timings['tCK_ps']))
 
 
 if __name__ == '__main__':

@@ -37,7 +37,7 @@ BUILD_JOBS=4 ./setup.sh
 
 `simulate` 在一个原生 C++ 事件循环中运行全部 stage 和副本。每个 lane 使用双输入 buffer，tile 的全部输入返回后开始计算，计算周期由代价表查得，C 累加器跨 K tile 保留，最终输出发往 DRAM。stage 的 DMA 请求、Ramulator2 回调、微批就绪、timestep 前进和交接均在该循环内推进。每个候选执行一次完整在线仿真；无争用 stage 参考值作为独立缓存条目建立。
 
-每核私有 SRAM 总量为 1 MiB，阵列为 32×32。M tile 根据双缓冲 BF16 A/B 与 FP32 C 的总占用选择，1 MiB 时最大对齐 M 为 4064，N/K tile 为 32。DiT microbatch 沿 dense GEMM 的 M 维合并，attention 保留每请求的独立 KV。编译器展开实际 transformer 层顺序，Q/KV/attention/MLP 的权重按层偏移引用同一份全局区域，Q→QK→AV→输出及 gated MLP 使用真实 tensor view 地址别名。
+每核私有 SRAM 默认 1 MiB，阵列为 32×32。`--core-sram-mib 0.25|1|4` 和 `--shared-sram-mib 0|64|256` 覆盖计划中的九种 SRAM 配置。共享 SRAM 按总核数等分，并作为每 lane 的额外 tile 容量，当前采用统一容量模型，未另行模拟共享 SRAM 的 bank 和端口竞争。M tile 根据双缓冲 BF16 A/B 与 FP32 C 的总占用选择，N/K tile 为 32。DiT microbatch 沿 dense GEMM 的 M 维合并，attention 保留每请求的独立 KV。编译器展开实际 transformer 层顺序，Q/KV/attention/MLP 的权重按层偏移引用同一份全局区域，Q→QK→AV→输出及 gated MLP 使用真实 tensor view 地址别名。
 
 在线模式的 `--max-inflight` 表示每个 stage 的在途 DMA transaction 上限，涵盖该 stage 的全部 lane。输入按饱和处理，stage 输入队列和可循环使用的请求 KV slot 产生物理反压。权重地址在 stage、副本和 timestep 之间共享，每个在飞请求的 prefix/suffix KV 占独立区域，完成后回收 slot。stage-local activation scratch 按当前活跃作业复用。handoff 通路按全局 256 GB/s 串行传输就绪作业。
 
@@ -51,9 +51,9 @@ BUILD_JOBS=4 ./setup.sh
   --output results/online_819
 ```
 
-目标 136.6 GB/s 使用 2 个 64-bit 控制器、tCK=937 ps，配置峰值为 136.6062 GB/s。目标 819 GB/s 使用 12 个 64-bit 控制器、tCK=938 ps，配置峰值为 818.7633 GB/s。ModuloInterleave 支持 12 个控制器的 cache-line 交织。两者距目标的时钟量化误差均小于 0.1%，实际有效带宽由访问模式和共享竞争决定。
+目标 136.6 GB/s 使用 2 个 64-bit LPDDR5 控制器、tCK=937 ps，配置峰值为 136.6062 GB/s，作为 LPDDR5X 带宽目标的 LPDDR5 时序近似。目标 819 GB/s 使用真实 HBM3 协议与 HBM34 控制器，共 16 个 64-bit channel，每个含两个 pseudochannel。沿用上游 HBM3_6400Mbps preset，名义峰值 819.2 GB/s，整数 ps 半时钟量化后的模型峰值为 820.5128 GB/s。实际有效带宽由访问模式和共享竞争决定。
 
-时序来自 LPDDR5 协议约束，在新时钟下按绝对 ns 时序向上取整。`memory_metadata` 保存 requested/effective bandwidth、控制器数、tCK、全部 timing overrides 和来源，便于进一步对照 LPDDR5X 器件校准。逻辑地址预算为 16 GiB，配置的物理容量分别为 16 GiB 和 48 GiB，程序地址被限制在逻辑预算内。
+LPDDR5 时序在新时钟下按绝对 ns 时序向上取整。HBM3 沿用上游 preset，其中部分 core timing 在上游注明为估计值。`memory_metadata` 保存协议、requested/effective bandwidth、控制器数、tCK、全部 timing overrides 和来源。两档物理容量和逻辑地址预算均为 16 GiB。
 
 ### 每硬件点分支定界
 
@@ -63,7 +63,7 @@ BUILD_JOBS=4 ./setup.sh
   --output results/search_32_136
 ```
 
-每个硬件点独立枚举合法的 prefix/timestep stage、核心划分、microbatch 和副本组合，并按实际资源分配去重。共享 DRAM 候选使用统一竞争策略。顺序基线覆盖 batch 1/2/5/10 与副本 1/2/4。`--include-uneven` 增加 3 和 4 个 DiT stage 的 timestep 分区。
+每个硬件点独立枚举合法的 prefix/timestep stage、microbatch 和副本组合，独立枚举每个 prefix stage 和 DiT stage 的阵列数 1/2/4/8/16/32/64/128，允许未分配阵列空闲。单候选可通过 `--prefix-stage-cores` 和 `--dit-stage-cores` 同时指定。共享 DRAM 候选使用统一竞争策略。顺序基线覆盖 batch 1/2/5/10 与副本 1/2/4。`--include-uneven` 增加 3 和 4 个 DiT stage 的 timestep 分区。
 
 候选按乐观 S、L 排序，每批最多 150 个由独立原生进程执行，维护实际 Pareto 前沿和吞吐最优 S*。`--objective throughput` 使用吞吐停止条件，`--objective pareto` 使用剩余乐观点的支配条件。达到主要停止条件后，搜索继续审核可能进入 2% 等价集合与 S≤1.1×S* 延迟最优集合的候选。`search_summary.json` 输出前沿、两类最优点、2% 集合、评估数量和停止证书。每个实际评估方案含逐 stage 的实际/无争用 service-time 比值。
 

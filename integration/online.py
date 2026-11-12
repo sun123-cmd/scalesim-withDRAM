@@ -15,9 +15,15 @@ from proposal_config import Hardware, Schedule
 
 def parameters(args):
     schedule = Schedule(args.kp, args.kd, args.batch, args.replicas,
-                        args.dit_core_numerator, .5)
-    return {'hardware': asdict(Hardware(args.cores, 2)), 'schedule': asdict(schedule),
+                        args.dit_core_numerator, .5, getattr(args, 'prefix_stage_cores', None),
+                        getattr(args, 'dit_stage_cores', None))
+    return {'hardware': asdict(hardware(args)), 'schedule': asdict(schedule),
             'mode': args.mode, 'tm_batch': args.batch}
+
+
+def hardware(args):
+    return Hardware(args.cores, 2, core_sram_bytes=int(getattr(args, 'core_sram_mib', 1) * (1 << 20)),
+                    shared_sram_bytes=getattr(args, 'shared_sram_mib', 64) * (1 << 20))
 
 
 def runtime(args, costs):
@@ -55,6 +61,10 @@ def main():
     parser.add_argument('--batch', type=int, default=2)
     parser.add_argument('--replicas', type=int, default=1)
     parser.add_argument('--dit-core-numerator', type=int, default=4)
+    parser.add_argument('--prefix-stage-cores', type=int)
+    parser.add_argument('--dit-stage-cores', type=int)
+    parser.add_argument('--core-sram-mib', type=float, choices=(.25, 1, 4), default=1)
+    parser.add_argument('--shared-sram-mib', type=int, choices=(0, 64, 256), default=64)
     parser.add_argument('--mode', choices=('pipeline', 'baseline'), default='pipeline')
     parser.add_argument('--warmup', type=int, default=20)
     parser.add_argument('--measure', type=int, default=50)
@@ -123,7 +133,7 @@ def main():
                     parser.error('Search requires uncontended stage references for the requested slowdown outputs')
                 error_margin, margin_source = resolve_error_margin(args, engine)
                 bound_fn = engine.bounds if args.bound_source == 'certified' else engine.stage_table_bounds
-                candidates = enumerate_candidates(Hardware(args.cores, 2), bound_fn, args.include_uneven)
+                candidates = enumerate_candidates(hardware(args), bound_fn, args.include_uneven)
                 candidates.sort(key=lambda item: (item['optimistic_s'], item['optimistic_l'], item['id']))
                 complete = args.candidate_limit is None or args.candidate_limit >= len(candidates)
                 if args.candidate_limit is not None:

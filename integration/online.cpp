@@ -686,7 +686,7 @@ public:
         const auto operation_rows = spec["operations"];
         for (auto operation : operation_rows.seq()) {
           auto parsed = parse_operation(operation);
-          U sram = integer(spec, "core_sram_bytes", 1048576);
+          U sram = integer(spec, "lane_sram_bytes", integer(spec, "core_sram_bytes", 1048576));
           U required = add(multiply(2 * parsed.word,
                                     add(multiply(parsed.mtile, parsed.tile),
                                         multiply(parsed.tile, parsed.tile))),

@@ -48,6 +48,8 @@ class Schedule:
     replicas: int = 1
     dit_core_fraction_numerator: int = 4
     beta: float = 0.5
+    prefix_stage_cores: int | None = None
+    dit_stage_cores: int | None = None
 
 
 def distribute(total, groups):
@@ -88,6 +90,17 @@ def allocate(hardware, schedule):
         raise ValueError('beta must be strictly between zero and one')
     # Equal replica partitions leave the integer remainder explicitly idle.
     replica_cores = hardware.cores // schedule.replicas
+    if schedule.prefix_stage_cores is not None or schedule.dit_stage_cores is not None:
+        if any(type(value) is not int or value < 1 for value in
+               (schedule.prefix_stage_cores, schedule.dit_stage_cores)):
+            raise ValueError('Both per-stage core counts must be positive integers')
+        used = schedule.kp * schedule.prefix_stage_cores + schedule.kd * schedule.dit_stage_cores
+        if used > replica_cores:
+            raise ValueError('Per-stage allocations exceed the per-replica core budget')
+        return {'replica_cores': replica_cores,
+                'idle_cores': hardware.cores - used * schedule.replicas,
+                'prefix_cores': [schedule.prefix_stage_cores] * schedule.kp,
+                'dit_cores': [schedule.dit_stage_cores] * schedule.kd, 'steps': steps}
     dit_cores = replica_cores * schedule.dit_core_fraction_numerator // 16
     prefix_cores = replica_cores - dit_cores
     return {'replica_cores': replica_cores,

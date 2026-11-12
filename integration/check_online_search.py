@@ -20,6 +20,25 @@ def evaluate(candidate):
 
 
 class OnlineSearchTests(unittest.TestCase):
+    def test_error_margin_preserves_latency_tradeoff(self):
+        values = candidates([(1, 1, 10, 10), (9.1, 20, 9.2, 21)])
+        result = search(values, evaluate, batch_size=1, error_margin=.1)
+        self.assertEqual({item['id'] for item in result['pareto_frontier']}, {'0', '1'})
+
+    def test_independent_stage_allocations_include_idle_cores(self):
+        from proposal_config import allocate, Schedule
+        allocation = allocate(Hardware(32), Schedule(kp=2, kd=2,
+                              prefix_stage_cores=4, dit_stage_cores=2))
+        self.assertEqual(allocation['prefix_cores'], [4, 4])
+        self.assertEqual(allocation['dit_cores'], [2, 2])
+        self.assertEqual(allocation['idle_cores'], 20)
+        values = enumerate_candidates(Hardware(8), lambda _: {'optimistic_l': 0, 'optimistic_s': 0})
+        for candidate in values:
+            schedule = candidate['parameters']['schedule']
+            if candidate['parameters']['mode'] == 'pipeline':
+                self.assertIn(schedule['prefix_stage_cores'], (1, 2, 4, 8))
+                self.assertIn(schedule['dit_stage_cores'], (1, 2, 4, 8))
+
     def test_pareto_matches_exhaustive_frontier(self):
         rows = [(1, 1, 2, 8), (2, 2, 5, 5), (3, 3, 8, 3),
                 (10, 10, 12, 12), (11, 11, 13, 13)]

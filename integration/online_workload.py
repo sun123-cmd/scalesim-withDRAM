@@ -3,6 +3,7 @@ import argparse
 import copy
 import fcntl
 import json
+import itertools
 import math
 import os
 import tempfile
@@ -298,7 +299,8 @@ def compile_online_program(hardware=Hardware(), schedule=Schedule(), costs=None,
         if hardware.cores < schedule.replicas:
             raise ValueError('Every baseline replica needs at least one core')
         source_hardware = replace(hardware, cores=max(16, hardware.cores))
-        source_schedule = replace(schedule, kp=1, kd=1, replicas=1, dit_core_fraction_numerator=8)
+        source_schedule = replace(schedule, kp=1, kd=1, replicas=1, dit_core_fraction_numerator=8,
+                                  prefix_stage_cores=None, dit_stage_cores=None)
         workload = build_stage_workloads(source_hardware, source_schedule)
         workload['hardware'] = dict(asdict(hardware), bandwidth_gbps=hardware.bandwidth_gbps,
                                     point_id=hardware.point_id, dram_target='LPDDR5X')
@@ -314,7 +316,8 @@ def compile_online_program(hardware=Hardware(), schedule=Schedule(), costs=None,
         workload = build_stage_workloads(hardware, schedule)
     operations = [unbatched(stage, schedule.b) for stage in workload['stages']]
     needed = set()
-    max_m = maximum_m_tile(hardware.core_sram_bytes, tile_size, hardware.word_bytes)
+    lane_sram = hardware.core_sram_bytes + hardware.shared_sram_bytes // hardware.cores
+    max_m = maximum_m_tile(lane_sram, tile_size, hardware.word_bytes)
     for stage, program in zip(workload['stages'], operations):
         batch = 1 if stage['kind'] == 'prefix' and mode == 'pipeline' else schedule.b
         for operation in program:
@@ -401,6 +404,8 @@ def compile_online_program(hardware=Hardware(), schedule=Schedule(), costs=None,
                        'timestep_start': stage.get('timestep_start', 0),
                        'timestep_count': stage['steps'], 'operations': compiled,
                        'core_sram_bytes': hardware.core_sram_bytes,
+                       'lane_sram_bytes': lane_sram,
+                       'shared_sram_bytes_per_lane': hardware.shared_sram_bytes // hardware.cores,
                        'double_buffer_minimum_bytes_per_lane': minimum_lane_bytes,
                        'maximum_m_tile': max_m})
     online = {'mode': mode, 'dram_capacity_bytes': LOGICAL_CAPACITY, 'accelerator_ghz': hardware.frequency_ghz, 'warmup_requests': warmup_requests,
@@ -460,10 +465,13 @@ def all_tile_shapes(tile_size=32):
     """Union of edge shapes for every supported batch, pipeline and baseline."""
     workload = build_stage_workloads(Hardware(), Schedule(kp=1, kd=1, b=1))
     needed = set()
-    for batch in (1, 2, 5, 10):
+    capacities = {int(private * (1 << 20)) + (shared << 20) // cores
+                  for private in (.25, 1, 4) for shared in (0, 64, 256)
+                  for cores in (8, 16, 32, 64, 128)}
+    for batch, capacity in itertools.product((1, 2, 5, 10), sorted(capacities)):
         for stage in workload['stages']:
             for operation in stage['operations']:
-                needed.update(tile_shapes(operation, batch, tile_size))
+                needed.update(tile_shapes(operation, batch, tile_size, maximum_m_tile(capacity)))
                 if stage['kind'] == 'prefix':
                     needed.update(tile_shapes(operation, 1, tile_size))
     return needed
@@ -487,16 +495,48 @@ def prepare_cost_table(path=None):
 
 
 def target_memory_config(target_gbps=136.6):
-    """Resolve a 64-bit/channel LPDDR timing model at the requested aggregate rate.
+    """Resolve the LPDDR5-derived target or the upstream HBM3 protocol model.
 
-    LPDDR5 protocol constraints are retained. Absolute-ns timing constraints are
-    rounded upward after clock scaling. This is an explicit bandwidth-calibrated
-    LPDDR5-derived timing model with one-picosecond clock quantization.
+    HBM3 uses the unmodified upstream speed bin, including its documented
+    estimated core timings and integer-picosecond half-clock quantization.
+    Neither configuration is a measured commercial-device timing calibration.
     """
     import ramulator
     if target_gbps not in (136.6, 819.0):
         raise ValueError('Target bandwidth must be 136.6 or 819 decimal GB/s')
-    channels = 2 if target_gbps == 136.6 else 12
+    if target_gbps == 819.0:
+        channels = 16
+        organization = 'HBM3_16Gb_8hi'
+        speed_bin = 'HBM3_6400Mbps'
+        dram = ramulator.dram.HBM3(org_preset=organization, timing_preset=speed_bin)
+        resolved = dram.to_config()
+        timings = dict(zip(ramulator.dram.HBM3.timing_params, resolved['timing']))
+        # One controller is a 64-bit channel with two 32-bit pseudochannels.
+        # Each pseudochannel transfers one 32-byte transaction per nBL ticks.
+        tck_ps = timings['tCK_ps']
+        effective = channels * 2 * resolved['data_payload_bytes'] * 1000 / (timings['nBL'] * tck_ps)
+        controller = ramulator.controller.HBM34(
+            dram=dram, scheduler=ramulator.scheduler.FRFCFS(),
+            refresh_manager=ramulator.refresh_manager.HBM34PerBankRefresh(),
+            row_policy=ramulator.row_policy.Open(), addr_mapper=ramulator.addr_mapper.RoBaRaCoCh())
+        memory = ramulator.memory_system.GenericDRAM(
+            clock_ratio=1, controllers=[controller] * channels,
+            channel_mapper={'impl': 'ModuloInterleave'})
+        metadata = {
+            'requested_bandwidth_gbps': target_gbps, 'protocol': 'HBM3',
+            'controller_impl': 'HBM34', 'controller_count': channels,
+            'channel_width_bits': 64, 'pseudochannels_per_controller': 2,
+            'tCK_ps': tck_ps, 'nominal_ck_ps': 625, 'tick_multiplier': 2,
+            'nominal_peak_gbps': 819.2, 'effective_peak_gbps': effective,
+            'relative_peak_error': abs(effective / target_gbps - 1),
+            'timing_model': 'HBM3 upstream preset with integer-picosecond half-CK ticks',
+            'timing_provenance': 'ramulator2/python/ramulator/dram/hbm3.py HBM3_6400Mbps; core timings marked Ramulator Guesstimate upstream',
+            'organization_preset': organization, 'timing_preset': speed_bin,
+            'timing_overrides': {}, 'logical_capacity_bytes': LOGICAL_CAPACITY,
+            'physical_capacity_bytes': channels * (1 << 30)}
+        return {'frontend': {'impl': 'External', 'clock_ratio': 1},
+                'memory_system': memory.to_config(), 'memory_metadata': metadata}
+    channels = 2
     tck_ps = round(64000 * channels / target_gbps)
     base = ramulator.dram.LPDDR5.timing_presets['LPDDR5_6400']
     preserve_ns = ('nCL', 'nRCD', 'nRP', 'nRPab', 'nRAS', 'nRC', 'nWR',
@@ -513,7 +553,9 @@ def target_memory_config(target_gbps=136.6):
     memory = ramulator.memory_system.GenericDRAM(clock_ratio=1, controllers=[controller] * channels,
                                                 channel_mapper={'impl': 'ModuloInterleave'})
     effective = channels * 64000 / tck_ps
-    metadata = {'requested_bandwidth_gbps': target_gbps, 'controller_count': channels,
+    metadata = {'requested_bandwidth_gbps': target_gbps, 'protocol': 'LPDDR5',
+                'target_label': 'LPDDR5X bandwidth target, LPDDR5-derived timing approximation',
+                'controller_count': channels,
                 'channel_width_bits': 64, 'tCK_ps': tck_ps,
                 'effective_peak_gbps': effective, 'relative_peak_error': abs(effective / target_gbps - 1),
                 'timing_model': 'LPDDR5-derived, bandwidth-calibrated, absolute-ns timing rescaled',

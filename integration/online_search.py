@@ -149,12 +149,12 @@ def _search(candidates, evaluator, workers=150, batch_size=150, error_margin=0.0
             frontier, best_s, best_l, _, _ = _selections(evaluated)
             if phase == 'primary' and best_s is not None:
                 if mode == 'throughput':
-                    stop = pending[0]['optimistic_s'] >= best_s['S'] * factor
+                    stop = pending[0]['optimistic_s'] * factor >= best_s['S']
                 else:
-                    stop = all(any(point['L'] * factor <= candidate['optimistic_l']
-                                   and point['S'] * factor <= candidate['optimistic_s']
-                                   and (point['L'] * factor < candidate['optimistic_l']
-                                        or point['S'] * factor < candidate['optimistic_s'])
+                    stop = all(any(point['L'] <= candidate['optimistic_l'] * factor
+                                   and point['S'] <= candidate['optimistic_s'] * factor
+                                   and (point['L'] < candidate['optimistic_l'] * factor
+                                        or point['S'] < candidate['optimistic_s'] * factor)
                                    for point in frontier) for candidate in pending)
                 if stop:
                     primary_reason = 'throughput_bound' if mode == 'throughput' else 'pareto_bound'
@@ -246,9 +246,10 @@ def enumerate_candidates(hardware, bound_fn, include_uneven=False):
     schedules = []
     seen = set()
     dit_counts = (1, 2, 3, 4, 5, 10) if include_uneven else (1, 2, 5, 10)
-    for kp, kd, numerator, batch, replicas in itertools.product(
-            (1, 2, 3, 4, 6), dit_counts, range(1, 16), (1, 2, 5, 10), (1, 2, 4)):
-        schedule = Schedule(kp, kd, batch, replicas, numerator, .5)
+    grid = tuple(value for value in (1, 2, 4, 8, 16, 32, 64, 128) if value <= hardware.cores)
+    for kp, kd, prefix_cores, dit_cores, batch, replicas in itertools.product(
+            (1, 2, 3, 4, 6), dit_counts, grid, grid, (1, 2, 5, 10), (1, 2, 4)):
+        schedule = Schedule(kp, kd, batch, replicas, 4, .5, prefix_cores, dit_cores)
         try:
             allocation = allocate(hardware, schedule)
         except ValueError:
