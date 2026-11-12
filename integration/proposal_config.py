@@ -147,6 +147,11 @@ def _balanced_contiguous(layers, groups):
     return [layers[start:end] for start, end in zip(boundaries, boundaries[1:])]
 
 
+@lru_cache(maxsize=5)
+def _prefix_groups(groups):
+    return _balanced_contiguous(_prefix_layers(), groups)
+
+
 def _batched_timestep(batch):
     operations = []
     for source in build_operations(action_horizon=16, denoise_steps=1):
@@ -168,7 +173,7 @@ def _batched_timestep(batch):
 def build_stage_workloads(hardware=Hardware(), schedule=Schedule()):
     allocation = allocate(hardware, schedule)
     replica_bandwidth = hardware.bandwidth_gbps / schedule.replicas
-    prefix_groups = _balanced_contiguous(_prefix_layers(), schedule.kp)
+    prefix_groups = _prefix_groups(schedule.kp)
     prefix_total = sum(allocation['prefix_cores'])
     dit_total = sum(allocation['dit_cores'])
     prefix_stages = []

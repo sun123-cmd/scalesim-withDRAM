@@ -23,7 +23,80 @@ BUILD_JOBS=4 ./setup.sh
 
 通过 `PYTHON=/path/to/python` 和 `CXX=/path/to/compiler` 可以指定解释器与编译器。脚本会自动识别常见编译器及 RHEL GCC Toolset 14。NumPy 固定为 1.26.4，以兼容 SCALE-Sim 的数组到标量转换。
 
-## Proposal timestep 流水入口
+## 在线闭环协同仿真与搜索
+
+```bash
+./run_online.sh prepare-costs
+./run_online.sh compile --cores 32 --target-gbps 136.6 --output results/online_program
+./run_online.sh simulate --cores 32 --target-gbps 136.6 \
+  --kp 2 --kd 2 --batch 2 --replicas 1 --max-inflight 64 \
+  --output results/online_136
+```
+
+`prepare-costs` 通过 SCALE-Sim 的 weight-stationary 计算入口测量实际边界 tile 的 cycle 数并缓存。`compile` 生成完整 π0.5 lazy tile 程序、全局地址布局与目标内存配置。当前负载采用 **horizon 16、10 个 denoise timestep、968 个 prefix token、BF16**。执行内容为符号 GEMM 的计算时序、DRAM 地址请求和完成事件，输出包含架构周期、延迟、带宽和请求统计。
+
+`simulate` 在一个原生 C++ 事件循环中运行全部 stage 和副本。每个 lane 使用双输入 buffer，tile 的全部输入返回后开始计算，计算周期由代价表查得，C 累加器跨 K tile 保留，最终输出发往 DRAM。stage 的 DMA 请求、Ramulator2 回调、微批就绪、timestep 前进和交接均在该循环内推进。每个候选执行一次完整在线仿真；无争用 stage 参考值作为独立缓存条目建立。
+
+每核私有 SRAM 总量为 1 MiB，阵列为 32×32。M tile 根据双缓冲 BF16 A/B 与 FP32 C 的总占用选择，1 MiB 时最大对齐 M 为 4064，N/K tile 为 32。DiT microbatch 沿 dense GEMM 的 M 维合并，attention 保留每请求的独立 KV。编译器展开实际 transformer 层顺序，Q/KV/attention/MLP 的权重按层偏移引用同一份全局区域，Q→QK→AV→输出及 gated MLP 使用真实 tensor view 地址别名。
+
+在线模式的 `--max-inflight` 表示每个 stage 的在途 DMA transaction 上限，涵盖该 stage 的全部 lane。输入按饱和处理，stage 输入队列和可循环使用的请求 KV slot 产生物理反压。权重地址在 stage、副本和 timestep 之间共享，每个在飞请求的 prefix/suffix KV 占独立区域，完成后回收 slot。stage-local activation scratch 按当前活跃作业复用。handoff 通路按全局 256 GB/s 串行传输就绪作业。
+
+默认先完成 20 个预热请求，再连续选择 50 个完成请求计算平均/p95 L 和平均输出间隔 S。L 从请求 admission 起算，包括流水内部等待和凑批时间。stage 报告记录 DMA 在途峰值、读延迟、实际带宽、row-hit rate、访存停顿和完整作业的 service time。`--events` 可保存 tile 读写、计算和交接的 JSONL 事件日志。每个候选目录包含 `program.yaml`、`native.yaml`、`native.log` 和 `result.json`，顶层 `summary.json` 汇总单方案结果。
+
+### 目标带宽与内存配置
+
+```bash
+./run_online.sh simulate --target-gbps 819 --cores 128 \
+  --kp 2 --kd 5 --batch 5 --dit-core-numerator 8 \
+  --output results/online_819
+```
+
+目标 136.6 GB/s 使用 2 个 64-bit 控制器、tCK=937 ps，配置峰值为 136.6062 GB/s。目标 819 GB/s 使用 12 个 64-bit 控制器、tCK=938 ps，配置峰值为 818.7633 GB/s。ModuloInterleave 支持 12 个控制器的 cache-line 交织。两者距目标的时钟量化误差均小于 0.1%，实际有效带宽由访问模式和共享竞争决定。
+
+时序来自 LPDDR5 协议约束，在新时钟下按绝对 ns 时序向上取整。`memory_metadata` 保存 requested/effective bandwidth、控制器数、tCK、全部 timing overrides 和来源，便于进一步对照 LPDDR5X 器件校准。逻辑地址预算为 16 GiB，配置的物理容量分别为 16 GiB 和 48 GiB，程序地址被限制在逻辑预算内。
+
+### 每硬件点分支定界
+
+```bash
+./run_online.sh search --cores 32 --target-gbps 136.6 \
+  --workers 150 --batch-size 150 --objective pareto \
+  --output results/search_32_136
+```
+
+每个硬件点独立枚举合法的 prefix/timestep stage、核心划分、microbatch 和副本组合，并按实际资源分配去重。共享 DRAM 候选使用统一竞争策略。顺序基线覆盖 batch 1/2/5/10 与副本 1/2/4。`--include-uneven` 增加 3 和 4 个 DiT stage 的 timestep 分区。
+
+候选按乐观 S、L 排序，每批最多 150 个由独立原生进程执行，维护实际 Pareto 前沿和吞吐最优 S*。`--objective throughput` 使用吞吐停止条件，`--objective pareto` 使用剩余乐观点的支配条件。达到主要停止条件后，搜索继续审核可能进入 2% 等价集合与 S≤1.1×S* 延迟最优集合的候选。`search_summary.json` 输出前沿、两类最优点、2% 集合、评估数量和停止证书。每个实际评估方案含逐 stage 的实际/无争用 service-time 比值。
+
+默认 `--bound-source certified --error-margin 0` 使用实测 tile compute work、已分配 lane 数和有限测量窗口 burst 上限构造下界。无争用 native stage service-time 表通过一次完整 stage job 建立，按程序、地址、内存和引擎版本签名缓存，并用于争用减速报告。
+
+按 pilot 的层可加性误差使用无争用表估计排序与剪枝，可直接生成并读取实测 e。
+
+```bash
+./run_online.sh pilot --cores 32 --target-gbps 136.6 \
+  --kp 2 --kd 2 --batch 2 --output results/search_pilot_bounds
+./run_online.sh search --cores 32 --target-gbps 136.6 \
+  --bound-source uncontended-stage-table \
+  --pilot-report results/search_pilot_bounds/pilot.json \
+  --workers 150 --batch-size 150 --output results/search_pilot_bounds
+```
+
+`pilot` 将实际配置的每个 stage 作为完整作业独立运行，再按原有顺序切成 transformer layer 作业独立运行。报告逐 stage 的 `abs(sum(layer services) - whole stage service) / whole stage service`，取最大值作为该 pilot 的 e。`pilot.json` 保存所有原生参考报告与模型签名，搜索检查运行模型和硬件点一致。多个 pilot 配置的最大误差也可通过 `--error-margin` 传入。
+
+该模式的证书依赖已测 pilot 误差对候选空间的适用性，结果标记为 conditional。开发时可用 `--candidate-limit`、`--max-evaluations` 和 `--timeout-seconds` 限定预算，结果会记录候选空间与评估的完整性。`checkpoint.json` 支持同一执行配置续跑，候选和参考表缓存按配置签名验证。并行数应与实际分配的 CPU 和内存资源一致。
+
+### 在线模式验收范围
+
+原生验收使用真实 Ramulator2 和小型完整十 timestep 程序，检查回调到计算的因果关系、最终 K 累加后的写回、双缓冲和 DMA 限额、batch 权重共享、KV/副本隔离、target 控制器配置、顺序基线和有限队列反压。编译器验收覆盖完整 π0.5 的形状、MAC 守恒、代价表、SRAM 占用、共享权重及 tensor view 地址。搜索验收将剪枝结果与小型空间穷举结果对照，并验证缓存、续跑和等价集合完整性。
+
+完整模型具有真实尺寸和逐 transaction 请求量，其 70 请求运行及全候选搜索的耗时取决于配置和实际资源。完成完整运行的结果以相应 `native.yaml`、`result.json` 和搜索证书为准。
+
+```bash
+.venv/bin/python -m pytest integration/check_online_*.py -q
+ONLINE_BINARY=integration/build/ramulator2-online \
+  .venv/bin/python -m pytest integration/check_online_native.py -q
+```
+
+## Proposal 解析与校准时间线入口
 
 当前实验统一使用 **action horizon 16、denoise steps 10、prefix tokens 968、BF16**。阵列为 32×32、1 GHz，每核私有 SRAM 总量为 1 MiB，共享 SRAM 为 64 MiB。目标 DRAM 容量为 16 GiB，带宽按 LPDDR5X 目标分别为 68.3、136.6、273.2、546.4 GB/s。
 
@@ -52,7 +125,7 @@ SCALE-Sim 校准使用 32×32 阵列、每核总计 1 MiB 私有 SRAM，三个 o
 
 原生回放器接受第五列 `stage_id`，将所有 stage 的请求送入同一个内存系统。`shared` 使用统一竞争队列及轮询发射；`static` 使用逐 stage 带宽限速。输出每 stage 的实际带宽、配额、读延迟、row-hit rate、重试次数，以及总带宽和物理峰值利用率。旧的四列轨迹和调用入口继续支持。
 
-当前原生内存诊断使用 LPDDR5-6400 x16 代理，每物理控制器峰值为 12.8 GB/s、容量为 1 GiB。目标 LPDDR5X 68.3 GB/s/channel、16 GiB 与代理物理参数分别保存。原生阶段压测输出用于竞争与限速校准，L/S 来自事件调度器及成本模型。在线访存完成事件与整请求调度的闭环反馈、LPDDR5X 时序校准、NeuSim 对照及三轮全量筛选属于后续工作。
+此解析入口的原生内存诊断使用 LPDDR5-6400 x16 代理，每物理控制器峰值为 12.8 GB/s、容量为 1 GiB。目标预算与代理物理参数分别保存，L/S 来自解析 stage 成本和时间线。完整请求的在线闭环、目标带宽配置与分支定界搜索使用 `run_online.sh` 入口。NeuSim 对照与完整三轮筛选实验可沿用这一解析入口进行交叉验证。
 
 计划中 32 核、DiT 分配 8 核、kd=10 的 pilot 组合会触发资源不足校验。单 prefix stage、单 DiT stage 的流水具有独立资源，整片顺序基线依次占用资源，二者的退化关系需要在资源一致的条件下校验。
 
@@ -65,7 +138,7 @@ REPLAY_CONFIG=results/proposal_pilot/memory_profile/memory.yaml \
   .venv/bin/python -m pytest integration/check_shared_replay.py -q
 ```
 
-## π0.5 一键运行
+## π0.5 独立分块估算入口
 
 ```bash
 ./run_pi05.sh
@@ -143,7 +216,7 @@ REPLAY_CONFIG=results/proposal_pilot/memory_profile/memory.yaml \
 
 配置项 `Ramulator2LatencyDir` 指定延迟文件目录，相对路径按配置文件所在目录解析。启用该选项时，`InterfaceBandwidth` 需设为 `USER`。
 
-## 建模方式
+## 轨迹回放入口的建模方式
 
 1. 在 `USER` 模式运行 SCALE-Sim，记录 IFMAP、FILTER、OFMAP 的 DRAM 轨迹。两次 SCALE-Sim 运行使用相同的缓冲区和带宽参数。
 2. 还原访存请求的发射时间，将负时间预取区间整体平移至零。每个访存行按 DRAM transaction 大小合并地址，三个流共同进入一个 Ramulator2 内存系统。队列满时重试，全部读写回调完成后结束。
