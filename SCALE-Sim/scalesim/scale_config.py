@@ -19,6 +19,7 @@ class scale_config:
         # Anand: ISSUE #2. Patch
         self.use_user_bandwidth = False
 
+        self.word_size_bytes = 1
         self.array_rows = 4
         self.array_cols = 4
         self.ifmap_sz_kb = 256
@@ -118,6 +119,9 @@ class scale_config:
         div_factor = 1
         
         section = 'architecture_presets'
+        self.word_size_bytes = config.getint(section, 'WordSizeBytes', fallback=1)
+        if self.word_size_bytes not in (1, 2, 4, 8):
+            raise ValueError('WordSizeBytes must be 1, 2, 4, or 8')
         self.array_rows = int(config.get(section, 'ArrayHeight'))
         self.array_cols = int(config.get(section, 'ArrayWidth'))
         self.ifmap_sz_kb = int(config.get(section, 'ifmapsramszkB'))
@@ -231,6 +235,7 @@ class scale_config:
 
         section = 'architecture_presets'
         config.add_section(section)
+        config.set(section, 'WordSizeBytes', str(self.word_size_bytes))
         config.set(section, 'ArrayHeight', str(self.array_rows))
         config.set(section, 'ArrayWidth', str(self.array_cols))
 

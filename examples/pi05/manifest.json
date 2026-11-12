@@ -1,0 +1,257 @@
+{
+  "model": "pi0.5",
+  "source_commit": "215abfb217dbac7d5f1273282331b9b1866c0479",
+  "sources": {
+    "pi0": "https://github.com/Physical-Intelligence/openpi/blob/215abfb217dbac7d5f1273282331b9b1866c0479/src/openpi/models/pi0.py",
+    "pi0_config": "https://github.com/Physical-Intelligence/openpi/blob/215abfb217dbac7d5f1273282331b9b1866c0479/src/openpi/models/pi0_config.py",
+    "gemma": "https://github.com/Physical-Intelligence/openpi/blob/215abfb217dbac7d5f1273282331b9b1866c0479/src/openpi/models/gemma.py",
+    "siglip": "https://github.com/Physical-Intelligence/openpi/blob/215abfb217dbac7d5f1273282331b9b1866c0479/src/openpi/models/siglip.py",
+    "model": "https://github.com/Physical-Intelligence/openpi/blob/215abfb217dbac7d5f1273282331b9b1866c0479/src/openpi/models/model.py"
+  },
+  "configuration": {
+    "cameras": 3,
+    "prompt_tokens": 200,
+    "action_horizon": 50,
+    "denoise_steps": 10,
+    "batch_size": 1,
+    "name": "pi0.5",
+    "image_height": 224,
+    "image_width": 224,
+    "patch_size": 14,
+    "vision_width": 1152,
+    "vision_layers": 27,
+    "vision_mlp": 4304,
+    "vision_heads": 16,
+    "language_width": 2048,
+    "language_layers": 18,
+    "language_mlp": 16384,
+    "expert_width": 1024,
+    "expert_layers": 18,
+    "expert_mlp": 4096,
+    "gemma_heads": 8,
+    "gemma_kv_heads": 1,
+    "gemma_head_dim": 256,
+    "action_dim": 32,
+    "dtype": "bfloat16",
+    "image_tokens_per_camera": 256,
+    "prefix_tokens": 968
+  },
+  "excluded_operations": [
+    "image preprocessing and tokenization",
+    "token embedding-table gathers",
+    "sinusoidal timestep embedding",
+    "LayerNorm, RMSNorm, and AdaRMS elementwise application",
+    "softmax, RoPE, GELU, SiLU, and attention masks",
+    "elementwise gates, residual additions, and Euler integration"
+  ],
+  "operations": [
+    {
+      "name": "vision.patch_embedding",
+      "m": 256,
+      "n": 1152,
+      "k": 588,
+      "count": 3,
+      "stage": "vision"
+    },
+    {
+      "name": "vision.blocks.qkv",
+      "m": 256,
+      "n": 1152,
+      "k": 1152,
+      "count": 243,
+      "stage": "vision"
+    },
+    {
+      "name": "vision.blocks.qk",
+      "m": 256,
+      "n": 256,
+      "k": 72,
+      "count": 1296,
+      "stage": "vision"
+    },
+    {
+      "name": "vision.blocks.av",
+      "m": 256,
+      "n": 72,
+      "k": 256,
+      "count": 1296,
+      "stage": "vision"
+    },
+    {
+      "name": "vision.blocks.attention_output",
+      "m": 256,
+      "n": 1152,
+      "k": 1152,
+      "count": 81,
+      "stage": "vision"
+    },
+    {
+      "name": "vision.blocks.mlp_up",
+      "m": 256,
+      "n": 4304,
+      "k": 1152,
+      "count": 81,
+      "stage": "vision"
+    },
+    {
+      "name": "vision.blocks.mlp_down",
+      "m": 256,
+      "n": 1152,
+      "k": 4304,
+      "count": 81,
+      "stage": "vision"
+    },
+    {
+      "name": "vision.multimodal_projector",
+      "m": 256,
+      "n": 2048,
+      "k": 1152,
+      "count": 3,
+      "stage": "vision"
+    },
+    {
+      "name": "prefix.blocks.q",
+      "m": 968,
+      "n": 2048,
+      "k": 2048,
+      "count": 18,
+      "stage": "prefix"
+    },
+    {
+      "name": "prefix.blocks.kv",
+      "m": 968,
+      "n": 256,
+      "k": 2048,
+      "count": 36,
+      "stage": "prefix"
+    },
+    {
+      "name": "prefix.blocks.qk",
+      "m": 968,
+      "n": 968,
+      "k": 256,
+      "count": 144,
+      "stage": "prefix"
+    },
+    {
+      "name": "prefix.blocks.av",
+      "m": 968,
+      "n": 256,
+      "k": 968,
+      "count": 144,
+      "stage": "prefix"
+    },
+    {
+      "name": "prefix.blocks.attention_output",
+      "m": 968,
+      "n": 2048,
+      "k": 2048,
+      "count": 18,
+      "stage": "prefix"
+    },
+    {
+      "name": "prefix.blocks.mlp_gate_and_up",
+      "m": 968,
+      "n": 16384,
+      "k": 2048,
+      "count": 36,
+      "stage": "prefix"
+    },
+    {
+      "name": "prefix.blocks.mlp_down",
+      "m": 968,
+      "n": 2048,
+      "k": 16384,
+      "count": 18,
+      "stage": "prefix"
+    },
+    {
+      "name": "denoise.action_input",
+      "m": 50,
+      "n": 1024,
+      "k": 32,
+      "count": 10,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.time_mlp",
+      "m": 1,
+      "n": 1024,
+      "k": 1024,
+      "count": 20,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.adarms_modulation",
+      "m": 1,
+      "n": 3072,
+      "k": 1024,
+      "count": 370,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.blocks.q",
+      "m": 50,
+      "n": 2048,
+      "k": 1024,
+      "count": 180,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.blocks.kv",
+      "m": 50,
+      "n": 256,
+      "k": 1024,
+      "count": 360,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.blocks.qk",
+      "m": 50,
+      "n": 1018,
+      "k": 256,
+      "count": 1440,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.blocks.av",
+      "m": 50,
+      "n": 256,
+      "k": 1018,
+      "count": 1440,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.blocks.attention_output",
+      "m": 50,
+      "n": 1024,
+      "k": 2048,
+      "count": 180,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.blocks.mlp_gate_and_up",
+      "m": 50,
+      "n": 4096,
+      "k": 1024,
+      "count": 360,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.blocks.mlp_down",
+      "m": 50,
+      "n": 1024,
+      "k": 4096,
+      "count": 180,
+      "stage": "denoise"
+    },
+    {
+      "name": "denoise.action_output",
+      "m": 50,
+      "n": 32,
+      "k": 1024,
+      "count": 10,
+      "stage": "denoise"
+    }
+  ]
+}

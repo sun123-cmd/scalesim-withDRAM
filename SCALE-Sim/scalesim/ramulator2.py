@@ -37,7 +37,7 @@ def replay(executable, config, trace, responses, stats, max_cycles, issue_width)
     return yaml.safe_load(stats.read_text())
 
 
-def prepare_requests(layer_path, output, tx_bytes, tck_ns, accelerator_mhz):
+def prepare_requests(layer_path, output, tx_bytes, tck_ns, accelerator_mhz, word_bytes=1):
     matrices = {}
     events = []
     accelerator_ns = 1000.0 / accelerator_mhz
@@ -52,9 +52,9 @@ def prepare_requests(layer_path, output, tx_bytes, tck_ns, accelerator_mhz):
         arrivals = matrix[:, 0].astype(np.int64) - default_latency
         matrices[name] = (matrix[:, 1:].astype(np.int64), arrivals)
         for row, (addresses, arrival) in enumerate(zip(matrix[:, 1:], arrivals)):
-            # SCALE-Sim currently models one-byte words. Merge only addresses
+            # Convert word addresses to byte addresses. Merge only addresses
             # in the same row and DRAM transaction, retaining later refetches.
-            bursts = sorted({int(address) // tx_bytes * tx_bytes
+            bursts = sorted({int(address) * word_bytes // tx_bytes * tx_bytes
                              for address in addresses if address != -1})
             for address in bursts:
                 events.append((int(arrival), name, row, operation, address))
@@ -69,7 +69,7 @@ def prepare_requests(layer_path, output, tx_bytes, tck_ns, accelerator_mhz):
     return matrices, mapping, accelerator_ns
 
 
-def save_latencies(layer_path, matrices, mapping, response_path, tck_ns, accelerator_ns, tx_bytes=64):
+def save_latencies(layer_path, matrices, mapping, response_path, tck_ns, accelerator_ns, tx_bytes=64, word_bytes=1):
     latencies = {}
     for name, _, _, default in STREAMS:
         requests, _ = matrices[name]
@@ -92,7 +92,8 @@ def save_latencies(layer_path, matrices, mapping, response_path, tck_ns, acceler
             latency = math.ceil(completion * tck_ns / accelerator_ns) - (arrival - origin)
             latencies[name][row] = max(latencies[name][row], latency)
             requests = matrices[name][0][row]
-            burst_words = (requests >= address) & (requests < address + tx_bytes)
+            byte_addresses = requests * word_bytes
+            burst_words = (byte_addresses >= address) & (byte_addresses < address + tx_bytes)
             word_latencies[name][row, burst_words] = latency
             seen.add(request_id)
     if len(seen) != len(mapping):
@@ -115,6 +116,11 @@ def run(args):
     source["run_presets"]["InterfaceBandwidth"] = "USER"
     source["run_presets"]["UseRamulatorTrace"] = "False"
     source.remove_option("run_presets", "Ramulator2LatencyDir")
+    if args.word_bytes is not None:
+        source["architecture_presets"]["WordSizeBytes"] = str(args.word_bytes)
+    word_bytes = source.getint("architecture_presets", "WordSizeBytes", fallback=1)
+    if word_bytes not in (1, 2, 4, 8):
+        raise ValueError("WordSizeBytes must be 1, 2, 4, or 8")
     scale_config = output / "scale.cfg"
     with scale_config.open("w") as config_file:
         source.write(config_file)
@@ -145,10 +151,10 @@ def run(args):
         responses = directory / "responses.csv"
         matrices, mapping, accelerator_ns = prepare_requests(
             output / "baseline" / run_name / f"layer{layer_id}", trace,
-            tx_bytes, tck_ns, args.accelerator_mhz)
+            tx_bytes, tck_ns, args.accelerator_mhz, word_bytes)
         stats = replay(args.replay.resolve(), dram_config, trace, responses,
                        directory / "stats.yaml", args.max_dram_cycles, args.issue_width)
-        streams = save_latencies(directory, matrices, mapping, responses, tck_ns, accelerator_ns, tx_bytes)
+        streams = save_latencies(directory, matrices, mapping, responses, tck_ns, accelerator_ns, tx_bytes, word_bytes)
         layer_summaries.append({"layer": layer_id, "streams": streams, "replay": stats["replay"]})
 
     source["run_presets"]["UseRamulatorTrace"] = "True"
@@ -170,7 +176,7 @@ def run(args):
             ("total_cycles_including_prefetch", "compute_cycles_including_stalls", "stall_cycles"),
             map(int, coupled_layer.get_compute_report_items()[:3])))
     summary = {"method": "two-pass latency feedback", "accelerator_mhz": args.accelerator_mhz,
-               "dram_tck_ns": tck_ns, "transaction_bytes": tx_bytes,
+               "dram_tck_ns": tck_ns, "transaction_bytes": tx_bytes, "word_size_bytes": word_bytes,
                "issue_width_per_dram_cycle": args.issue_width, "layers": layer_summaries,
                "baseline_report": str(output / "baseline" / run_name / "COMPUTE_REPORT.csv"),
                "coupled_report": str(output / "coupled" / run_name / "COMPUTE_REPORT.csv")}
@@ -191,6 +197,7 @@ def main():
     parser.add_argument("--accelerator-mhz", type=float, default=1000.0)
     parser.add_argument("--issue-width", type=int, default=4)
     parser.add_argument("--max-dram-cycles", type=int, default=100000000)
+    parser.add_argument("--word-bytes", type=int, choices=(1, 2, 4, 8))
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     if not math.isfinite(args.accelerator_mhz) or args.accelerator_mhz <= 0:

@@ -23,6 +23,23 @@ class TestRamulator2(unittest.TestCase):
     def prepare(self):
         return prepare_requests(self.path, self.path / 'requests.trace', 64, 0.5, 1000)
 
+    def test_bf16_word_addresses_cross_transaction_boundary(self):
+        np.savetxt(self.path / 'IFMAP_DRAM_TRACE.csv', [[-1, 31, 32]], delimiter=',')
+        matrices, mapping, ns = prepare_requests(
+            self.path, self.path / 'requests.trace', 64, 0.5, 1000, word_bytes=2)
+        bursts = [item[4] for item in mapping if item[0] == 'ifmap']
+        self.assertEqual(bursts, [0, 64])
+        with (self.path / 'responses.csv').open('w') as file:
+            writer = csv.writer(file)
+            writer.writerow(['id', 'requested_cycle', 'completion_cycle'])
+            for request_id, (_, _, _, cycle, address) in enumerate(mapping):
+                writer.writerow([request_id, cycle, cycle + (4 if address == 0 else 20)])
+        save_latencies(self.path, matrices, mapping, self.path / 'responses.csv',
+                       0.5, ns, word_bytes=2)
+        port = Ramulator2Port(self.path / 'ifmap.npz', 1)
+        np.testing.assert_array_equal(port.service_reads([[31], [32]], [[0], [0]]), [[2], [10]])
+        port.verify_complete()
+
     def test_padding_zero_address_burst_coalescing_and_clock_conversion(self):
         matrices, mapping, accelerator_ns = self.prepare()
         self.assertEqual(len(mapping), 4)

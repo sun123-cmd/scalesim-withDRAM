@@ -235,7 +235,7 @@ class single_layer_sim:
 
         # 2.1 Setup the memory system if it was not setup externally
         if not self.memory_system_ready_flag:
-            word_size = 1           # bytes, this can be incorporated in the config file
+            word_size = self.config.word_size_bytes
             active_buf_frac = 0.5   # This can be incorporated in the config as well
 
             ifmap_buf_size_kb, filter_buf_size_kb, ofmap_buf_size_kb = self.config.get_mem_sizes()
