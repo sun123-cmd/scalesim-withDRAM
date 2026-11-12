@@ -23,15 +23,57 @@ BUILD_JOBS=4 ./setup.sh
 
 通过 `PYTHON=/path/to/python` 和 `CXX=/path/to/compiler` 可以指定解释器与编译器。脚本会自动识别常见编译器及 RHEL GCC Toolset 14。NumPy 固定为 1.26.4，以兼容 SCALE-Sim 的数组到标量转换。
 
+## Proposal timestep 流水入口
+
+当前实验统一使用 **action horizon 16、denoise steps 10、prefix tokens 968、BF16**。阵列为 32×32、1 GHz，每核私有 SRAM 总量为 1 MiB，共享 SRAM 为 64 MiB。目标 DRAM 容量为 16 GiB，带宽按 LPDDR5X 目标分别为 68.3、136.6、273.2、546.4 GB/s。
+
+```bash
+./run_proposal.sh --beta auto
+./run_proposal.sh --all-hardware --beta auto --output results/proposal_16
+./run_proposal.sh --kp 3 --kd 5 --batch 5 --dit-core-numerator 4 --beta auto
+```
+
+默认代表点为 32 核、2 个逻辑 channel、2 个 prefix stage、2 个 DiT timestep stage、b=2、1 个副本、DiT 分配 4/16 核心。16 个硬件点与 proposal 表格一致。3 和 4 个 DiT stage 分别分配 timestep 为 4/3/3、3/3/2/2。prefix 按真实连续层进行计算量均衡切分。
+
+200 个请求按饱和 admission 输入，前 50 个和最后 20 个完成请求用于裁剪。`summary.json` 输出平均/p95 L、有效输出间隔 S、各 stage 成本、四种 batch 的整片顺序基线；`timeline.json` 保存每个请求和 timestep 的时间线。多硬件入口输出 `hardware_summary.csv` 和 JSON，无效组合会记录原因后继续。
+
+L 从请求进入 prefix stage 0 起计，包含凑批和内部排队。有限 WIP credit 默认每副本为 kp+b×(kd+1)，可通过 `--max-inflight` 指定。交接总带宽 256 GB/s 在全部副本的 stage 边界间均分，microbatch 的交接字节按 b 增长。时间线检查 stage 资源互斥和 timestep 顺序，报告带窗口边界修正的 Little's law 残差及 `steady_state_flag`。深流水和大 batch 的 200 请求运行可能尚未稳定，应保留该标记并增加请求数验证。
+
+理想访存账本支持 camera dense projection 权重共享、DiT microbatch 权重共享和 MQA 的 KV-head 复用。horizon16 时，每请求 prefix 精确 FLOPs 为 4,635,481,079,808，DiT 每 timestep 为 12,526,288,896，10 timestep 后总量为 4,760,743,968,768。权重账本分别为 4,791,831,552 B 和 859,963,392 B，KV 为 17,842,176 B/request。
+
+### SCALE-Sim 校准与共享队列诊断
+
+```bash
+./run_proposal.sh --beta auto --calibrate-tiles --profile-memory \
+  --memory-policy both --output results/proposal_pilot
+```
+
+SCALE-Sim 校准使用 32×32 阵列、每核总计 1 MiB 私有 SRAM，三个 operand buffer 分别为 384/384/256 KiB。对唯一分块测量计算周期，以每 stage 的阵列数计算分块波次，结合理想字节账本与静态带宽计算 stage 时间。`calibration.json` 保存可核对的分块结果。共享 SRAM 的配置与 stage 份额会记录。固定小分块校准主要测量阵列填充与排空，完整算子的 SRAM 敏感性及跨算子共享 SRAM 复用属于后续校准范围。
+
+原生回放器接受第五列 `stage_id`，将所有 stage 的请求送入同一个内存系统。`shared` 使用统一竞争队列及轮询发射；`static` 使用逐 stage 带宽限速。输出每 stage 的实际带宽、配额、读延迟、row-hit rate、重试次数，以及总带宽和物理峰值利用率。旧的四列轨迹和调用入口继续支持。
+
+当前原生内存诊断使用 LPDDR5-6400 x16 代理，每物理控制器峰值为 12.8 GB/s、容量为 1 GiB。目标 LPDDR5X 68.3 GB/s/channel、16 GiB 与代理物理参数分别保存。原生阶段压测输出用于竞争与限速校准，L/S 来自事件调度器及成本模型。在线访存完成事件与整请求调度的闭环反馈、LPDDR5X 时序校准、NeuSim 对照及三轮全量筛选属于后续工作。
+
+计划中 32 核、DiT 分配 8 核、kd=10 的 pilot 组合会触发资源不足校验。单 prefix stage、单 DiT stage 的流水具有独立资源，整片顺序基线依次占用资源，二者的退化关系需要在资源一致的条件下校验。
+
+回归测试可执行以下命令。原生队列测试通过环境变量指定已导出的内存配置。
+
+```bash
+.venv/bin/python -m pytest integration/check_*.py \
+  SCALE-Sim/test/test_ramulator2.py SCALE-Sim/test/test_read_buffer_stall_accounting.py -q
+REPLAY_CONFIG=results/proposal_pilot/memory_profile/memory.yaml \
+  .venv/bin/python -m pytest integration/check_shared_replay.py -q
+```
+
 ## π0.5 一键运行
 
 ```bash
 ./run_pi05.sh
 ```
 
-默认采用官方 OpenPI π0.5 的 BF16、3 路 224×224 图像、200 个 padded prompt token、50 步动作 horizon、10 次去噪迭代和 batch=1。模型形状固定于 OpenPI 提交 `215abfb217dbac7d5f1273282331b9b1866c0479`，源码链接保存在生成的 manifest 中。
+默认采用官方 OpenPI π0.5 的 BF16、3 路 224×224 图像、200 个 padded prompt token、16 步动作 horizon、10 次去噪迭代和 batch=1。模型形状固定于 OpenPI 提交 `215abfb217dbac7d5f1273282331b9b1866c0479`，源码链接保存在生成的 manifest 中。
 
-入口生成完整尺寸的 26 个 GEMM 算子族，覆盖 SigLIP 视觉编码器、PaliGemma prefix KV、动作专家、时间投影和 AdaRMS 调制投影。所有 M/N/K 维度按 32 分块，真实边界尺寸保留，唯一分块模拟一次，再按完整模型的层数、head、相机和去噪次数汇总。默认全结构共 `2,512,199,286,784` MAC，15 种唯一分块的 25,668 个 DRAM 请求已全部完成。
+入口生成完整尺寸的 26 个 GEMM 算子族，覆盖 SigLIP 视觉编码器、PaliGemma prefix KV、动作专家、时间投影和 AdaRMS 调制投影。所有 M/N/K 维度按 32 分块，真实边界尺寸保留，唯一分块模拟一次，再按完整模型的层数、head、相机和去噪次数汇总。默认全结构共 `2,380,371,984,384` MAC，实际分块计数和完成请求数记录在随附验证摘要中。
 
 `results/pi05/summary.json` 包含逐算子、逐阶段与全结构的 MAC、分块数、加权周期、stall 和 DRAM 请求计数。`results/pi05/tile_simulation/` 保存实际模拟的分块报告和逐请求轨迹。`examples/pi05/validated_summary.json` 保存一次验证摘要。
 

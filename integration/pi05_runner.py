@@ -39,14 +39,21 @@ def operation_tiles(operation, tile_size):
     return result
 
 
-def write_inputs(root, destination, shapes, word_bytes):
+def write_inputs(root, destination, shapes, word_bytes, array_size=16, sram_kib=64, total_sram_kib=None):
     config = configparser.ConfigParser()
     config.read(root / 'examples/scale.cfg')
     config['general']['run_name'] = 'pi05_tiles'
-    for key, value in {'ArrayHeight': 16, 'ArrayWidth': 16, 'IfmapSramSzkB': 64,
-                       'FilterSramSzkB': 64, 'OfmapSramSzkB': 64, 'Bandwidth': 16,
+    for key, value in {'ArrayHeight': array_size, 'ArrayWidth': array_size, 'IfmapSramSzkB': sram_kib,
+                       'FilterSramSzkB': sram_kib, 'OfmapSramSzkB': sram_kib, 'Bandwidth': 16,
                        'Dataflow': 'ws', 'WordSizeBytes': word_bytes}.items():
         config['architecture_presets'][key] = str(value)
+    if total_sram_kib is not None:
+        if total_sram_kib < 8:
+            raise ValueError('Total SRAM must hold all three operand buffers')
+        input_kib = total_sram_kib * 3 // 8
+        for key, value in {'IfmapSramSzkB': input_kib, 'FilterSramSzkB': input_kib,
+                           'OfmapSramSzkB': total_sram_kib - 2 * input_kib}.items():
+            config['architecture_presets'][key] = str(value)
     config['run_presets']['InterfaceBandwidth'] = 'USER'
     config['run_presets']['UseRamulatorTrace'] = 'False'
     with (destination / 'scale.cfg').open('w') as file:
@@ -118,7 +125,7 @@ def run(args):
     summary_path = output / 'summary.json'
     summary_path.unlink(missing_ok=True)
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    write_inputs(root, output, shapes, args.word_bytes)
+    write_inputs(root, output, shapes, args.word_bytes, args.array_size, args.sram_kib, args.total_sram_kib)
     simulation_dir = output / 'tile_simulation'
     command = [sys.executable, '-m', 'scalesim.ramulator2', '-c', str(output / 'scale.cfg'),
                '-t', str(output / 'tiles.csv'), '-l', str(output / 'layout.csv'), '-i', 'gemm',
@@ -162,12 +169,15 @@ def main():
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--tile-size', type=int, default=32)
+    parser.add_argument('--array-size', type=int, default=16)
+    parser.add_argument('--sram-kib', type=int, default=64)
+    parser.add_argument('--total-sram-kib', type=int)
     parser.add_argument('--word-bytes', type=int, default=2)
     parser.add_argument('--accelerator-mhz', type=float, default=1000)
     parser.add_argument('--replay', type=Path, default=root / 'integration/build/ramulator2-replay')
     parser.add_argument('--dram-config', type=Path, default=root / 'examples/ramulator2_ddr4.py')
     args = parser.parse_args()
-    if args.tile_size <= 0 or args.word_bytes <= 0:
+    if min(args.tile_size, args.word_bytes, args.array_size, args.sram_kib, args.total_sram_kib) <= 0:
         parser.error('Tile size and word bytes must be positive')
     run(args)
 

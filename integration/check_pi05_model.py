@@ -13,7 +13,7 @@ class Pi05ModelShapes(unittest.TestCase):
         self.assertEqual(ops["vision.patch_embedding"]["m"], 256)
         self.assertEqual(ops["vision.patch_embedding"]["count"], 3)
         self.assertEqual(ops["prefix.blocks.q"]["m"], 968)
-        self.assertEqual(ops["denoise.blocks.qk"]["n"], 1018)
+        self.assertEqual(ops["denoise.blocks.qk"]["n"], 984)
 
     def test_transformer_depths_heads_and_mqa(self):
         ops = self.operations()
@@ -57,7 +57,7 @@ class Pi05ModelShapes(unittest.TestCase):
                 self.assertIs(type(op[field]), int)
                 self.assertGreater(op[field], 0)
         self.assertEqual(sum(op["m"] * op["n"] * op["k"] * op["count"] for op in ops),
-                         2512199286784)
+                         2380371984384)
 
     def test_invalid_inputs_fail(self):
         for options in ({"cameras": 0}, {"prompt_tokens": -1}, {"action_horizon": 0},

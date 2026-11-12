@@ -11,7 +11,7 @@
   "configuration": {
     "cameras": 3,
     "prompt_tokens": 200,
-    "action_horizon": 50,
+    "action_horizon": 16,
     "denoise_steps": 10,
     "batch_size": 1,
     "name": "pi0.5",
@@ -167,7 +167,7 @@
     },
     {
       "name": "denoise.action_input",
-      "m": 50,
+      "m": 16,
       "n": 1024,
       "k": 32,
       "count": 10,
@@ -191,7 +191,7 @@
     },
     {
       "name": "denoise.blocks.q",
-      "m": 50,
+      "m": 16,
       "n": 2048,
       "k": 1024,
       "count": 180,
@@ -199,7 +199,7 @@
     },
     {
       "name": "denoise.blocks.kv",
-      "m": 50,
+      "m": 16,
       "n": 256,
       "k": 1024,
       "count": 360,
@@ -207,23 +207,23 @@
     },
     {
       "name": "denoise.blocks.qk",
-      "m": 50,
-      "n": 1018,
+      "m": 16,
+      "n": 984,
       "k": 256,
       "count": 1440,
       "stage": "denoise"
     },
     {
       "name": "denoise.blocks.av",
-      "m": 50,
+      "m": 16,
       "n": 256,
-      "k": 1018,
+      "k": 984,
       "count": 1440,
       "stage": "denoise"
     },
     {
       "name": "denoise.blocks.attention_output",
-      "m": 50,
+      "m": 16,
       "n": 1024,
       "k": 2048,
       "count": 180,
@@ -231,7 +231,7 @@
     },
     {
       "name": "denoise.blocks.mlp_gate_and_up",
-      "m": 50,
+      "m": 16,
       "n": 4096,
       "k": 1024,
       "count": 360,
@@ -239,7 +239,7 @@
     },
     {
       "name": "denoise.blocks.mlp_down",
-      "m": 50,
+      "m": 16,
       "n": 1024,
       "k": 4096,
       "count": 180,
@@ -247,7 +247,7 @@
     },
     {
       "name": "denoise.action_output",
-      "m": 50,
+      "m": 16,
       "n": 32,
       "k": 1024,
       "count": 10,

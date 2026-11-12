@@ -51,11 +51,11 @@ EXCLUDED_OPERATIONS = [
 ]
 
 
-def build_operations(cameras=3, prompt_tokens=200, action_horizon=50,
+def build_operations(cameras=3, prompt_tokens=200, action_horizon=16,
                      denoise_steps=10, batch_size=1):
     """Return all GEMM families for one action-chunk generation.
 
-    Pi0Config(pi05=True) supplies a 200-token padded prompt, 50 action tokens,
+    Pi0Config(pi05=True) supplies a 200-token padded prompt; the experiment uses 16 action tokens,
     32 action channels, and three camera slots. sample_actions defaults to ten
     Euler steps. State is encoded in the prompt, so no extra state token is
     appended. Image and language prefix KV is constructed once and reused by
@@ -145,7 +145,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cameras", type=int, default=3)
     parser.add_argument("--prompt-tokens", type=int, default=200)
-    parser.add_argument("--action-horizon", type=int, default=50)
+    parser.add_argument("--action-horizon", type=int, default=16)
     parser.add_argument("--denoise-steps", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1)
     args = parser.parse_args()
