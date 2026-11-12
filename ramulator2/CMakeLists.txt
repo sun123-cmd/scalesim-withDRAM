@@ -24,6 +24,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 #### External libraries ####
+set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+find_package(Threads REQUIRED)
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Skip updating the external dependencies after populating them for the first time")
 
@@ -80,6 +82,7 @@ target_link_libraries(
   ramulator
   PRIVATE fmt::fmt
   PRIVATE yaml-cpp::yaml-cpp
+  PRIVATE Threads::Threads
 )
 
 add_subdirectory(src/ramulator)
