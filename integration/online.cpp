@@ -16,7 +16,6 @@
 #include <limits>
 #include <map>
 #include <memory>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -106,7 +105,8 @@ struct Buffer {
 struct Lane {
   bool active = false, writing = false;
   U last_stall = std::numeric_limits<U>::max(), token = 0, row = 0, col = 0,
-    rep = 0, next_k = 0, consume_k = 0, write_pending = 0;
+    rep = 0, height = 0, width = 0, next_k = 0, consume_k = 0,
+    write_pending = 0;
   size_t writes_sent = 0;
   std::array<Buffer, 2> buffers;
   std::vector<U> writes;
@@ -115,7 +115,8 @@ struct Stage {
   int replica = 0, position = 0;
   bool dit = false, active = false, finished = false;
   U cores = 1, step_start = 0, step_count = 1, current_step = 0, op_index = 0,
-    next_output = 0, total_outputs = 0;
+    next_output = 0, total_outputs = 0, output_rows = 0,
+    output_mtiles = 0, output_ntiles = 0, active_computes = 0;
   U last_stall = std::numeric_limits<U>::max(), peak_inflight = 0, inflight = 0,
     initial_inflight = 0, read_requests = 0, write_requests = 0,
     completions = 0, completed_reads = 0, retries = 0, read_latency = 0,
@@ -229,7 +230,7 @@ class Engine {
                        sample * op.sample_stride
                  : request_slot(s, sample) * op.stride;
   }
-  void event(const std::string &type, const Stage &s, U address = 0, U tile = 0,
+  void event(const char *type, const Stage &s, U address = 0, U tile = 0,
              U output_tile = 0, U k = 0) {
     if (!events)
       return;
@@ -246,26 +247,24 @@ class Engine {
     }
     events << "]}\n";
   }
-  void add_range(std::set<U> &addresses, U start, U bytes) {
+  void add_range(std::vector<U> &addresses, U start, U bytes) {
     if (!bytes)
       return;
     if (start >= capacity || bytes > capacity - start)
       throw std::runtime_error("DMA address exceeds configured DRAM capacity");
     U last = (start + bytes - 1) / tx * tx;
     for (U addr = start / tx * tx;; addr += tx) {
-      addresses.insert(addr);
+      addresses.push_back(addr);
       if (addr == last)
         break;
     }
   }
   std::vector<U> reads(Stage &s, Lane &lane, Buffer &buffer) {
     const auto &op = s.operations[s.op_index];
-    std::set<U> addresses;
+    std::vector<U> addresses;
     U sample = op.shared ? 0 : lane.rep / op.count,
       instance = op.shared ? lane.rep : lane.rep % op.count;
-    U height = std::min(op.mtile,
-                        (op.shared ? op.m * s.ids.size() : op.m) - lane.row),
-      width = std::min(op.tile, op.n - lane.col);
+    U height = lane.height, width = lane.width;
     for (U row = 0; row < height; ++row) {
       U logical = lane.row + row;
       U owner = op.shared ? logical / op.m : sample;
@@ -294,16 +293,19 @@ class Engine {
                                multiply(lane.col, op.word))),
                   width * op.word);
     }
-    return {addresses.begin(), addresses.end()};
+    // Keep the set's ascending, deduplicated DMA order without allocating a
+    // tree node for every burst in every tile.
+    std::sort(addresses.begin(), addresses.end());
+    addresses.erase(std::unique(addresses.begin(), addresses.end()),
+                    addresses.end());
+    return addresses;
   }
   std::vector<U> writes(Stage &s, Lane &lane) {
     const auto &op = s.operations[s.op_index];
-    std::set<U> addresses;
+    std::vector<U> addresses;
     U sample = op.shared ? 0 : lane.rep / op.count,
       instance = op.shared ? lane.rep : lane.rep % op.count;
-    U height = std::min(op.mtile,
-                        (op.shared ? op.m * s.ids.size() : op.m) - lane.row),
-      width = std::min(op.tile, op.n - lane.col);
+    U height = lane.height, width = lane.width;
     for (U row = 0; row < height; ++row) {
       U logical = lane.row + row;
       U owner = op.shared ? logical / op.m : sample;
@@ -314,23 +316,27 @@ class Engine {
                     add(multiply(local, op.cr), multiply(lane.col, op.word))),
                 width * op.word);
     }
-    return {addresses.begin(), addresses.end()};
+    std::sort(addresses.begin(), addresses.end());
+    addresses.erase(std::unique(addresses.begin(), addresses.end()),
+                    addresses.end());
+    return addresses;
   }
   void setup_operation(Stage &s) {
     const auto &op = s.operations[s.op_index];
     U m = op.shared ? op.m * s.ids.size() : op.m;
     U reps = op.shared ? op.count : op.count * s.ids.size();
-    s.total_outputs = ((m + op.mtile - 1) / op.mtile) *
-                      ((op.n + op.tile - 1) / op.tile) * reps;
+    s.output_rows = m;
+    s.output_mtiles = (m + op.mtile - 1) / op.mtile;
+    s.output_ntiles = (op.n + op.tile - 1) / op.tile;
+    s.total_outputs = s.output_mtiles * s.output_ntiles * reps;
     s.next_output = 0;
+    s.active_computes = 0;
     for (auto &lane : s.lanes)
       lane = Lane{};
   }
   void assign_output(Stage &s, Lane &lane) {
     const auto &op = s.operations[s.op_index];
-    U ntiles = (op.n + op.tile - 1) / op.tile,
-      m = op.shared ? op.m * s.ids.size() : op.m,
-      mtiles = (m + op.mtile - 1) / op.mtile;
+    U ntiles = s.output_ntiles, mtiles = s.output_mtiles;
     U index = s.next_output++;
     lane = Lane{};
     lane.active = true;
@@ -339,6 +345,8 @@ class Engine {
     index %= ntiles * mtiles;
     lane.row = index / ntiles * op.mtile;
     lane.col = index % ntiles * op.tile;
+    lane.height = std::min(op.mtile, s.output_rows - lane.row);
+    lane.width = std::min(op.tile, op.n - lane.col);
   }
   void fill(Stage &s, Lane &lane) {
     const auto &op = s.operations[s.op_index];
@@ -447,6 +455,7 @@ class Engine {
           computing_any |= cycle < buffer.end;
           if (cycle >= buffer.end) {
             event("compute_end", s, 0, buffer.token, lane.token, buffer.k);
+            --s.active_computes;
             lane.consume_k += buffer.depth;
             buffer = Buffer{};
             if (lane.consume_k == op.k) {
@@ -464,24 +473,29 @@ class Engine {
         for (auto &buffer : lane.buffers)
           if (buffer.used && buffer.k == lane.consume_k) {
             if (buffer.sent == buffer.reads.size() && buffer.pending == 0) {
-              U height = std::min(op.mtile,
-                                  (op.shared ? op.m * s.ids.size() : op.m) -
-                                      lane.row),
-                width = std::min(op.tile, op.n - lane.col);
+              U height = lane.height, width = lane.width;
               auto it = op.costs.find({height, width, buffer.depth});
               if (it == op.costs.end())
                 throw std::runtime_error(
                     "Missing measured compute cost for edge tile");
               U duration = std::max<U>(
                   1, std::ceil(it->second / (accelerator_ghz * tck)));
-              for (U row = 0; row < height; ++row) {
-                U owner =
-                    op.shared ? (lane.row + row) / op.m : lane.rep / op.count;
-                records[s.ids[owner]].macs += width * buffer.depth;
+              // Consecutive rows owned by one request contribute the same MAC
+              // count. Preserve request ownership at microbatch boundaries.
+              for (U row = 0; row < height;) {
+                U owner = op.shared ? (lane.row + row) / op.m
+                                    : lane.rep / op.count;
+                U count = op.shared
+                              ? std::min(height - row,
+                                         op.m - (lane.row + row) % op.m)
+                              : height;
+                records[s.ids[owner]].macs += width * buffer.depth * count;
+                row += count;
               }
               event("compute_start", s, 0, buffer.token, lane.token, buffer.k);
               buffer.computing = true;
               buffer.end = cycle + duration;
+              ++s.active_computes;
 
               computing_any = true;
             } else {
@@ -760,11 +774,13 @@ public:
       start_jobs();
       // Resolve retirement, operation barriers and dispatch in the same clock.
       // DMA acceptance remains limited by the single global issue budget.
-      for (int pass = 0; pass < 3; ++pass)
-        for (size_t offset = 0; offset < stages.size(); ++offset) {
-          size_t index = (cycle + offset) % stages.size();
+      const size_t first_stage = cycle % stages.size();
+      for (int pass = 0; pass < 3; ++pass) {
+        for (size_t index = first_stage; index < stages.size(); ++index)
           advance_stage(stages[index], index);
-        }
+        for (size_t index = 0; index < first_stage; ++index)
+          advance_stage(stages[index], index);
+      }
       route_jobs();
       if (!measuring && completed >= warmup) {
         measuring = true;
@@ -788,11 +804,11 @@ public:
       }
       if (completed >= warmup + measured)
         break;
+      // Every ended compute was retired by advance_stage above, and every
+      // newly started compute lasts at least one cycle. This is exactly the
+      // former per-buffer count, including across the measurement reset.
       for (auto &s : stages)
-        for (const auto &lane : s.lanes)
-          for (const auto &buffer : lane.buffers)
-            if (buffer.used && buffer.computing && buffer.end > cycle)
-              ++s.compute_cycles;
+        s.compute_cycles += s.active_computes;
       ++cycle;
       memory->tick();
     }
