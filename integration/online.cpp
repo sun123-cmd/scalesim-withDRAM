@@ -144,7 +144,7 @@ class Engine {
   std::vector<bool> replica_busy;
   bool baseline = false, isolated = false;
   U calibration_batch = 1;
-  U cycle = 0, tx = 0, max_cycles = 0, warmup = 20, measured = 50, batch = 1,
+  U cycle = 0, tx = 0, max_cycles = 0, warmup = 0, measured = 50, batch = 1,
     replicas = 1, max_inflight = 64, issue_width = 16, issued = 0,
     completed = 0, handoff_available = 0, handoff_bytes = 0, queue_capacity = 0;
   U admission_cursor = 0, request_stride = 0, capacity = U(16) << 30,
@@ -647,7 +647,7 @@ public:
     batch = integer(online, "batch", 1);
     max_inflight = integer(online, "max_inflight", 64);
     issue_width = integer(online, "issue_width", 16);
-    warmup = integer(online, "warmup_requests", 20);
+    warmup = integer(online, "warmup_requests", 0);
     measured = integer(online, "measure_requests", 50);
     max_cycles = integer(online, "max_cycles", 100000000000ULL);
     accelerator_ghz = online["accelerator_ghz"].as<double>(1);

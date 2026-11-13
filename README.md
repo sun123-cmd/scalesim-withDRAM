@@ -41,7 +41,7 @@ BUILD_JOBS=4 ./setup.sh
 
 在线模式的 `--max-inflight` 表示每个 stage 的在途 DMA transaction 上限，涵盖该 stage 的全部 lane。输入按饱和处理，stage 输入队列和可循环使用的请求 KV slot 产生物理反压。权重地址在 stage、副本和 timestep 之间共享，每个在飞请求的 prefix/suffix KV 占独立区域，完成后回收 slot。stage-local activation scratch 按当前活跃作业复用。handoff 通路按全局 256 GB/s 串行传输就绪作业。
 
-默认先完成 20 个预热请求，再连续选择 50 个完成请求计算平均/p95 L 和平均输出间隔 S。L 从请求 admission 起算，包括流水内部等待和凑批时间。stage 报告记录 DMA 在途峰值、读延迟、实际带宽、row-hit rate、访存停顿和完整作业的 service time。`--events` 可保存 tile 读写、计算和交接的 JSONL 事件日志。每个候选目录包含 `program.yaml`、`native.yaml`、`native.log` 和 `result.json`，顶层 `summary.json` 汇总单方案结果。
+默认 `--warmup 0 --measure 50`，从首个完成请求开始统计平均/p95 L 和平均输出间隔 S。L 从请求 admission 起算，包括流水内部等待和凑批时间。默认测量包含启动阶段，S 表示这 50 个完成请求的平均输出间隔；需要研究稳态时可显式指定 `--warmup` 并检验测量窗口是否稳定。stage 报告记录 DMA 在途峰值、读延迟、实际带宽、row-hit rate、访存停顿和完整作业的 service time。`--events` 可保存 tile 读写、计算和交接的 JSONL 事件日志。每个候选目录包含 `program.yaml`、`native.yaml`、`native.log` 和 `result.json`，顶层 `summary.json` 汇总单方案结果。
 
 ### 目标带宽与内存配置
 

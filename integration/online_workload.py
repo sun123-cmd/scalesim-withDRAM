@@ -268,7 +268,7 @@ def activation_views(program):
 
 
 def compile_online_program(hardware=Hardware(), schedule=Schedule(), costs=None,
-                           warmup_requests=20, measure_requests=50, max_inflight=64,
+                           warmup_requests=0, measure_requests=50, max_inflight=64,
                            tile_size=32, max_cycles=1000000000000, mode="pipeline"):
     """Compile compact lazy tile loops and a single shared physical address map."""
     for name, value in (('warmup_requests', warmup_requests), ('measure_requests', measure_requests),
@@ -579,7 +579,7 @@ def main():
     parser.add_argument('--dit-core-numerator', type=int, default=4)
     parser.add_argument('--target-gbps', type=float, choices=(136.6, 819.0), default=136.6)
     parser.add_argument('--max-inflight', type=int, default=64)
-    parser.add_argument('--warmup', type=int, default=20)
+    parser.add_argument('--warmup', type=int, default=0)
     parser.add_argument('--measure', type=int, default=50)
     args = parser.parse_args()
     costs = read_compute_costs(args.cost_table) if args.cost_table else None

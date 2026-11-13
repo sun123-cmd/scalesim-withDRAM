@@ -99,6 +99,16 @@ class OnlineNativeAcceptance(unittest.TestCase):
             self.assertGreater(stage['completed_transactions'], 0)
             self.assertGreater(stage['actual_bandwidth_gbps'], 0)
 
+    def test_omitted_warmup_measures_first_completions(self):
+        config = fixture_config(batch=1, replicas=1, warmup=0, measure=6)
+        del config['online']['warmup_requests']
+        result, _ = self.run_config(config)
+        online = result['online']
+        self.assertEqual(online['warmup_requests'], 0)
+        self.assertEqual(online['measurement_start_cycle'], 0)
+        self.assertEqual(online['measured_requests'], 6)
+        self.assertEqual(min(row['request_id'] for row in online['requests']), 0)
+
     def test_read_completion_gates_compute_and_writes_follow_accumulation(self):
         _, events = self.run_config(fixture_config())
         issued, completed, compute_starts = {}, {}, {}

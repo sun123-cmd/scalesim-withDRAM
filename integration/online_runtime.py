@@ -45,7 +45,7 @@ def exclusive_output(path, blocking=False):
 
 
 class OnlineRuntime:
-    def __init__(self, binary, output, costs, target_gbps=136.6, warmup=20,
+    def __init__(self, binary, output, costs, target_gbps=136.6, warmup=0,
                  measure=50, max_inflight=64, max_cycles=1000000000000,
                  timeout_seconds=None, events=False, reference_table=True):
         self.binary = Path(binary).resolve()

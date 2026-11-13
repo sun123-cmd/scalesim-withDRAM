@@ -66,7 +66,8 @@ def main():
     parser.add_argument('--core-sram-mib', type=float, choices=(.25, 1, 4), default=1)
     parser.add_argument('--shared-sram-mib', type=int, choices=(0, 64, 256), default=64)
     parser.add_argument('--mode', choices=('pipeline', 'baseline'), default='pipeline')
-    parser.add_argument('--warmup', type=int, default=20)
+    parser.add_argument('--warmup', type=int, default=0,
+                        help='Completed requests excluded before measurement; default 0')
     parser.add_argument('--measure', type=int, default=50)
     parser.add_argument('--max-inflight', type=int, default=64,
                         help='Maximum outstanding DMA transactions per stage, across its lanes')

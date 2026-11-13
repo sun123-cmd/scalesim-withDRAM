@@ -28,7 +28,7 @@ class OnlineWorkload(unittest.TestCase):
     def test_default_uses_complete_horizon16_workload_and_real_dma_limit(self):
         data = self.compile()
         self.assertEqual(data['workload']['workload']['action_horizon'], 16)
-        self.assertEqual(data['online']['warmup_requests'], 20)
+        self.assertEqual(data['online']['warmup_requests'], 0)
         self.assertEqual(data['online']['measure_requests'], 50)
         self.assertEqual(data['online']['max_inflight'], 64)
         self.assertEqual(sum(stage['timestep_count'] for stage in data['online']['stages']
