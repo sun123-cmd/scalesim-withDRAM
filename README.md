@@ -65,7 +65,7 @@ LPDDR5 时序在新时钟下按绝对 ns 时序向上取整。HBM3 沿用上游 
 
 每个硬件点独立枚举合法的 prefix/timestep stage、microbatch 和副本组合，独立枚举每个 prefix stage 和 DiT stage 的阵列数 1/2/4/8/16/32/64/128，允许未分配阵列空闲。单候选可通过 `--prefix-stage-cores` 和 `--dit-stage-cores` 同时指定。共享 DRAM 候选使用统一竞争策略。顺序基线覆盖 batch 1/2/5/10 与副本 1/2/4。`--include-uneven` 增加 3 和 4 个 DiT stage 的 timestep 分区。
 
-候选按乐观 S、L 排序，每批最多 150 个由独立原生进程执行，维护实际 Pareto 前沿和吞吐最优 S*。`--objective throughput` 使用吞吐停止条件，`--objective pareto` 使用剩余乐观点的支配条件。达到主要停止条件后，搜索继续审核可能进入 2% 等价集合与 S≤1.1×S* 延迟最优集合的候选。`search_summary.json` 输出前沿、两类最优点、2% 集合、评估数量和停止证书。每个实际评估方案含逐 stage 的实际/无争用 service-time 比值。
+候选按乐观 S、L 排序，最多同时运行 `min(--workers, --batch-size)` 个独立原生进程。任一候选完成后立即保存结果、更新实际 Pareto 前沿和吞吐最优 S*，再补充仍需评估的候选。`--objective throughput` 使用吞吐停止条件，`--objective pareto` 使用剩余乐观点的支配条件。达到主要停止条件后，搜索继续审核可能进入 2% 等价集合与 S≤1.1×S* 延迟最优集合的候选，并收集全部已启动结果。`search_summary.json` 输出前沿、两类最优点、2% 集合、评估数量和停止证书。每个实际评估方案含逐 stage 的实际/无争用 service-time 比值。
 
 默认 `--bound-source certified --error-margin 0` 使用实测 tile compute work、已分配 lane 数和有限测量窗口 burst 上限构造下界。无争用 native stage service-time 表通过一次完整 stage job 建立，按程序、地址、内存和引擎版本签名缓存，并用于争用减速报告。
 
