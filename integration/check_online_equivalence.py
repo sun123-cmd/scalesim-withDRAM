@@ -36,8 +36,14 @@ class OnlineNativeEquivalence(unittest.TestCase):
                 source = directory / 'program.yaml'
                 source.write_text(yaml.safe_dump(current, sort_keys=False))
                 report = directory / 'report.yaml'
+                environment = os.environ.copy()
+                library_variable = ('ONLINE_BASELINE_LIBRARY_DIR' if name == 'baseline'
+                                    else 'ONLINE_LIBRARY_DIR')
+                if os.environ.get(library_variable):
+                    environment['LD_LIBRARY_PATH'] = os.environ[library_variable]
                 process = subprocess.run([str(binary), str(source), str(report)],
-                                         capture_output=True, text=True, timeout=30)
+                                         capture_output=True, text=True, timeout=30,
+                                         env=environment)
                 self.assertEqual(process.returncode, 0, process.stderr)
                 results.append((yaml.safe_load(report.read_text()),
                                 (directory / 'events.jsonl').read_bytes()))
