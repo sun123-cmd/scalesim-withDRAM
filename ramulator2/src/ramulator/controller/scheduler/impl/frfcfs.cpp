@@ -24,7 +24,7 @@ class FRFCFSScheduler : public IScheduler, public Implementation {
 
     for (auto it = buffer.begin(); it != buffer.end(); it++) {
       // Derive the current command (prerequisite resolution)
-      it->command = m_ctrl->get_preq_command(it->final_command, it->addr_vec);
+      it->command = m_ctrl->get_preq_command(*it);
 
       // Apply eligibility filter
       if (filter && !filter(*it)) {
@@ -34,12 +34,19 @@ class FRFCFSScheduler : public IScheduler, public Implementation {
       // First eligible candidate — take it, check timing once
       if (candidate == buffer.end()) {
         candidate = it;
-        cand_timing_ok = m_ctrl->check_timing(it->command, it->addr_vec);
+        cand_timing_ok = m_ctrl->check_timing(*it);
+        continue;
+      }
+
+      // A ready incumbent wins against any equally/newer arriving request,
+      // irrespective of the challenger's timing. Commands and filters above
+      // are still evaluated, preserving scheduler predicate semantics.
+      if (cand_timing_ok && it->arrive >= candidate->arrive) {
         continue;
       }
 
       // Compare challenger against incumbent (incumbent timing is cached)
-      bool it_timing_ok = m_ctrl->check_timing(it->command, it->addr_vec);
+      bool it_timing_ok = m_ctrl->check_timing(*it);
       if (cand_timing_ok != it_timing_ok) {
         if (it_timing_ok) {
           candidate = it;

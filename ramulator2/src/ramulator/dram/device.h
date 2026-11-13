@@ -2,6 +2,7 @@
 #define RAMULATOR_DRAM_DEVICE_H
 
 #include <memory>
+#include <cstdint>
 #include <vector>
 
 #include "ramulator/base/config_node.h"
@@ -42,10 +43,12 @@ class DRAMDevice {
   void issue_command(int command, const AddrVec_t& addr_vec, Clk_t clk);
 
   // Timing-only check — hierarchical (walks node tree)
-  bool check_timing(int command, const AddrVec_t& addr_vec, Clk_t clk);
+  bool check_timing(int command, const AddrVec_t& addr_vec, Clk_t clk,
+                    int flat_bank_id = -1);
 
   // Prerequisite check — flat bank dispatch
-  int get_preq_command(int command, const AddrVec_t& addr_vec, Clk_t clk);
+  int get_preq_command(int command, const AddrVec_t& addr_vec, Clk_t clk,
+                       int flat_bank_id = -1);
 
   // Address a single-bank prerequisite of a multi-bank command to the bank that needs it.
   AddrVec_t preq_addr_vec(int command, int preq, const AddrVec_t& addr_vec, Clk_t clk) const;
@@ -113,6 +116,19 @@ class DRAMDevice {
   }
 
  private:
+  struct PrerequisiteCache {
+    int command = -1;
+    int row = -1;
+    int resolved = -1;
+  };
+  struct TimingCache {
+    uint64_t generation = 0;
+    Clk_t ready = -1;
+  };
+  int m_row_level = -1;
+  std::vector<PrerequisiteCache> m_prerequisite_cache;
+  uint64_t m_timing_generation = 1;
+  std::vector<TimingCache> m_timing_cache;
   int m_num_node_extensions = 0;
 
   // Flat bank dispatch — apply action to target banks

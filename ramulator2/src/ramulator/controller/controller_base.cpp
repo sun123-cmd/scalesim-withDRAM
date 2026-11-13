@@ -24,8 +24,23 @@ bool ControllerBase::check_timing(int command, const AddrVec_t& addr_vec) {
   return m_device.check_timing(command, addr_vec, m_clk);
 }
 
+bool ControllerBase::check_timing(const Request& request) {
+  return m_device.check_timing(request.command, request.addr_vec, m_clk,
+                              request.flat_bank_id);
+}
+
 int ControllerBase::get_preq_command(int command, const AddrVec_t& addr_vec) {
   return m_device.get_preq_command(command, addr_vec, m_clk);
+}
+
+int ControllerBase::get_preq_command(const Request& request) {
+  return m_device.get_preq_command(request.final_command, request.addr_vec,
+                                   m_clk, request.flat_bank_id);
+}
+
+int ControllerBase::get_request_bank_id(const Request& request) const {
+  return request.flat_bank_id >= 0 ? request.flat_bank_id
+                                   : m_device.get_flat_bank_id(request.addr_vec);
 }
 
 int ControllerBase::get_tx_bytes() const {
@@ -136,6 +151,7 @@ bool ControllerBase::send(Request& req) {
   // PassThroughAddrMapper is a no-op (addr_vec already set by frontend).
   m_addr_mapper->apply(req);
   req.addr_vec[0] = m_channel_id;
+  req.flat_bank_id = m_device.get_flat_bank_id(req.addr_vec);
 
   req.final_command = m_device.m_spec->supported_requests[req.type_id];
 
@@ -192,6 +208,8 @@ bool ControllerBase::send(Request& req) {
 }
 
 bool ControllerBase::priority_send(Request& req) {
+  // Maintenance prerequisite resolution can change the target address.
+  req.flat_bank_id = -1;
   if (req.final_command < 0 || req.final_command >= m_device.m_spec->command_count) {
     throw std::runtime_error(fmt::format(
         "Invalid priority request final_command {}: expected a DRAM command id in [0, {})",
@@ -228,7 +246,7 @@ void ControllerBase::tick_prologue() {
 
 void ControllerBase::retire_request(ReqBuffer::iterator& req_it, ReqBuffer& buffer) {
   if (&buffer == &m_active_buffer) {
-    m_active_per_bank[m_device.get_flat_bank_id(req_it->addr_vec)]--;
+    m_active_per_bank[get_request_bank_id(*req_it)]--;
   }
   if (&buffer == &m_write_buffer) {
     m_buffered_write_addrs.erase(req_it->addr);
@@ -256,7 +274,7 @@ void ControllerBase::retire_request(ReqBuffer::iterator& req_it, ReqBuffer& buff
 
 void ControllerBase::promote_to_active(ReqBuffer::iterator& req_it, ReqBuffer& buffer) {
   if (m_active_buffer.enqueue(*req_it)) {
-    m_active_per_bank[m_device.get_flat_bank_id(req_it->addr_vec)]++;
+    m_active_per_bank[get_request_bank_id(*req_it)]++;
     if (&buffer == &m_write_buffer) {
       m_buffered_write_addrs.erase(req_it->addr);
     }
@@ -276,7 +294,7 @@ ControllerBase::Candidate ControllerBase::pick_best_ready_from(
   if (it == buffer.end()) {
     return c;
   }
-  if (!check_timing(it->command, it->addr_vec)) {
+  if (!check_timing(*it)) {
     return c;
   }
   c.valid = true;
@@ -323,7 +341,7 @@ ControllerBase::Candidate ControllerBase::pick_rw_if(RequestFilterRef filter) {
   // accesses to other banks unaffected (JESD235D §6.3.2.6, JESD239D §6.12.2, JESD250C §7.17).
   const bool any_reserved = mark_reserved_banks();
   return pick_best_ready_from(buffer, [&](const Request& req) {
-    if (any_reserved && m_reserved_banks[m_device.get_flat_bank_id(req.addr_vec)]) {
+    if (any_reserved && m_reserved_banks[get_request_bank_id(req)]) {
       return false;
     }
     if (would_close_active(req)) {
@@ -375,12 +393,12 @@ bool ControllerBase::would_close_active(const Request& req, bool req_is_active) 
     return false;
   }
 
-  const int own_bank_id = req_is_active ? m_device.get_flat_bank_id(req.addr_vec) : -1;
+  const int own_bank_id = req_is_active ? get_request_bank_id(req) : -1;
   auto others_active = [&](int bank_id) { return m_active_per_bank[bank_id] - (bank_id == own_bank_id ? 1 : 0); };
 
   // Hot path: single-bank close (PREpb, RDA, WRA) — O(1) lookup.
   if (m_device.m_spec->bank_targets[req.command] == BankTarget::Single) {
-    return others_active(m_device.get_flat_bank_id(req.addr_vec)) > 0;
+    return others_active(get_request_bank_id(req)) > 0;
   }
 
   // Multi-bank close: any target bank with an active request.

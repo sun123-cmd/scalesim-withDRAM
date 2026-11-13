@@ -260,7 +260,7 @@ bool LPDDRControllerBase::is_owned_act2_candidate(const Request& req) const {
     return true;
   }
 
-  int flat_bank_id = m_device.get_flat_bank_id(req.addr_vec);
+  int flat_bank_id = get_request_bank_id(req);
   assert(m_act2_owner_valid[flat_bank_id]);
 
   // Only the owner request stored in m_activating_buffer may issue ACT2.
@@ -324,7 +324,7 @@ ControllerBase::Candidate LPDDRControllerBase::pick_urgent_act2() {
   Clk_t best_deadline = -1;
 
   for (auto it = m_activating_buffer.begin(); it != m_activating_buffer.end(); it++) {
-    int flat_bank_id = m_device.get_flat_bank_id(it->addr_vec);
+    int flat_bank_id = get_request_bank_id(*it);
     assert(m_act2_owner_valid[flat_bank_id]);
 
     Clk_t deadline = m_act2_deadline[flat_bank_id];
@@ -354,7 +354,7 @@ ControllerBase::Candidate LPDDRControllerBase::pick_deferred_act2() {
   Clk_t best_deadline = -1;
 
   for (auto it = m_activating_buffer.begin(); it != m_activating_buffer.end(); it++) {
-    int flat_bank_id = m_device.get_flat_bank_id(it->addr_vec);
+    int flat_bank_id = get_request_bank_id(*it);
     assert(m_act2_owner_valid[flat_bank_id]);
 
     Clk_t deadline = m_act2_deadline[flat_bank_id];
@@ -381,7 +381,7 @@ void LPDDRControllerBase::issue_owned_act2(Candidate cand, Act2IssueKind kind) {
   assert(cand.buffer == &m_activating_buffer);
   assert(cand.it->command == m_cmd_act2);
 
-  int flat_bank_id = m_device.get_flat_bank_id(cand.it->addr_vec);
+  int flat_bank_id = get_request_bank_id(*cand.it);
   assert(m_act2_owner_valid[flat_bank_id]);
   assert(m_act2_deadline[flat_bank_id] >= 0);
   assert(m_clk <= m_act2_deadline[flat_bank_id]);
@@ -447,7 +447,7 @@ void LPDDRControllerBase::issue_standard_candidate(Candidate cand) {
 
   upgrade_by_row_policy(cand);
   int cmd = cand.it->command;
-  int flat_bank_id = m_device.get_flat_bank_id(cand.it->addr_vec);
+  int flat_bank_id = get_request_bank_id(*cand.it);
 
   if (cmd == m_cmd_act1) {
     assert(!m_act2_owner_valid[flat_bank_id]);
@@ -484,7 +484,7 @@ void LPDDRControllerBase::issue_standard_candidate(Candidate cand) {
 }
 
 void LPDDRControllerBase::move_to_activating(ReqBuffer::iterator& req_it, ReqBuffer& buffer) {
-  int flat_bank_id = m_device.get_flat_bank_id(req_it->addr_vec);
+  int flat_bank_id = get_request_bank_id(*req_it);
   assert(!m_act2_owner_valid[flat_bank_id]);
 
   bool enqueued = m_activating_buffer.enqueue(*req_it);
@@ -503,7 +503,7 @@ void LPDDRControllerBase::move_to_activating(ReqBuffer::iterator& req_it, ReqBuf
 }
 
 void LPDDRControllerBase::promote_from_activating(ReqBuffer::iterator& req_it, ReqBuffer& buffer) {
-  int flat_bank_id = m_device.get_flat_bank_id(req_it->addr_vec);
+  int flat_bank_id = get_request_bank_id(*req_it);
   assert(m_act2_owner_valid[flat_bank_id]);
   assert(m_clk <= m_act2_deadline[flat_bank_id]);
 

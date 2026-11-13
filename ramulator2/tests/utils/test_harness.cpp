@@ -52,7 +52,9 @@ class DeviceUnderTestCpp {
     int cmd = spec().get_command_id(command_name);
 
     int preq = m_device.get_preq_command(cmd, addr_vec, clk);
-    bool timing_ok = m_device.check_timing(cmd, addr_vec, clk);
+    const int flat_bank_id = can_query_bank_local_state(cmd, addr_vec)
+                                ? m_device.get_flat_bank_id(addr_vec) : -1;
+    bool timing_ok = m_device.check_timing(cmd, addr_vec, clk, flat_bank_id);
     bool ready = (preq == cmd) && timing_ok;
 
     bool row_hit = false;

@@ -1,4 +1,5 @@
 #include "ramulator/dram/device.h"
+#include <algorithm>
 
 namespace Ramulator {
 
@@ -6,8 +7,11 @@ void DRAMDevice::init(std::unique_ptr<DRAMSpec> spec) {
   m_spec_owner = std::move(spec);
   m_spec = m_spec_owner.get();
   m_bank_level = m_spec->get_level_id("Bank");
+  m_row_level = m_spec->get_level_id("Row");
   m_root = std::make_unique<DRAMNode>(m_spec, nullptr, 0, 0);
   m_root->for_each_at_level(m_bank_level, [&](DRAMNode* bank) { m_bank_nodes.push_back(bank); });
+  m_prerequisite_cache.resize(m_bank_nodes.size());
+  m_timing_cache.resize(m_bank_nodes.size() * m_spec->command_count);
 }
 
 void DRAMDevice::set_channel_id(int channel_id) {
@@ -15,6 +19,9 @@ void DRAMDevice::set_channel_id(int channel_id) {
 }
 
 void DRAMDevice::issue_command(int command, const AddrVec_t& addr_vec, Clk_t clk) {
+  // Every issued command can change rank/channel/sibling constraints, including
+  // commands with no bank-state action. Invalidate all cached timing paths.
+  ++m_timing_generation;
   m_root->update_timing(command, addr_vec, clk);
   if (m_spec->bank_targets[command] == BankTarget::Pair) {
     // Partner path from the pair level down; the shared nodes above it are updated once
@@ -24,7 +31,25 @@ void DRAMDevice::issue_command(int command, const AddrVec_t& addr_vec, Clk_t clk
   apply_action(command, addr_vec, clk);
 }
 
-bool DRAMDevice::check_timing(int command, const AddrVec_t& addr_vec, Clk_t clk) {
+bool DRAMDevice::check_timing(int command, const AddrVec_t& addr_vec, Clk_t clk,
+                            int flat_bank_id) {
+  // A concrete single-bank leaf address follows exactly one root-to-bank path.
+  // Its timing is the maximum absolute ready clock on that path. Between DRAM
+  // commands only clk changes, so comparing against that maximum is exact even
+  // for future-clock lookahead queries. Wildcards, bank pairs and subarrays use
+  // the original traversal below.
+  if (flat_bank_id >= 0 && m_spec->bank_targets[command] == BankTarget::Single &&
+      m_bank_nodes[flat_bank_id]->m_child_nodes.empty()) {
+    auto& cached = m_timing_cache[flat_bank_id * m_spec->command_count + command];
+    if (cached.generation != m_timing_generation) {
+      cached.ready = -1;
+      for (auto* node = m_bank_nodes[flat_bank_id]; node; node = node->m_parent_node) {
+        cached.ready = std::max(cached.ready, node->m_cmd_ready_clk[command]);
+      }
+      cached.generation = m_timing_generation;
+    }
+    return cached.ready == -1 || clk >= cached.ready;
+  }
   if (!m_root->check_timing(command, addr_vec, clk)) {
     return false;
   }
@@ -32,9 +57,24 @@ bool DRAMDevice::check_timing(int command, const AddrVec_t& addr_vec, Clk_t clk)
          m_root->check_timing(command, partner_addr_vec(command, addr_vec), clk);
 }
 
-int DRAMDevice::get_preq_command(int command, const AddrVec_t& addr_vec, Clk_t clk) {
+int DRAMDevice::get_preq_command(int command, const AddrVec_t& addr_vec, Clk_t clk,
+                               int flat_bank_id) {
   auto preq_fn = m_spec->funcs.preqs[command];
   if (!preq_fn) return command;
+
+  // RD/WR prerequisites only change after an action on their bank. Keep timing
+  // checks and scheduler eligibility checks live on every cycle; only reuse the
+  // state-derived command, with exact bank/row/final-command identity.
+  if (m_spec->command_meta[command].preq_bank_row_only &&
+      m_spec->bank_targets[command] == BankTarget::Single) {
+    const int bank_id = flat_bank_id >= 0 ? flat_bank_id : get_flat_bank_id(addr_vec);
+    auto& cached = m_prerequisite_cache[bank_id];
+    const int row = addr_vec[m_row_level];
+    if (cached.command != command || cached.row != row) {
+      cached = {command, row, preq_fn(m_bank_nodes[bank_id], command, addr_vec, clk)};
+    }
+    return cached.resolved;
+  }
 
   int resolved = command;
   for_each_target_bank_while(command, addr_vec, [&](int flat_bank_id) {
@@ -124,6 +164,8 @@ void DRAMDevice::apply_action(int command, const AddrVec_t& addr_vec, Clk_t clk)
   if (!action_fn) return;
   for_each_target_bank(command, addr_vec, [&](int flat_bank_id) {
     action_fn(m_bank_nodes[flat_bank_id], command, addr_vec, clk);
+    // Includes refresh, split activation, precharge and auto-precharge actions.
+    m_prerequisite_cache[flat_bank_id].command = -1;
   });
 }
 

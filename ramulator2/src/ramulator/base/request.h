@@ -14,6 +14,9 @@ struct Request {
   Addr_t addr = -1;
   Addr_t intra_channel_addr = -1;  // Flat address with channel bits stripped
   AddrVec_t addr_vec{};
+  // Controller-owned cache; normal mapped request addresses stay immutable.
+  // Maintenance requests retain -1 because prerequisites may re-address them.
+  int flat_bank_id = -1;
 
   // Universal built-in external request types — always Read = 0, Write = 1.
   // Additional non-negative ids may exist as metadata for future extensions.

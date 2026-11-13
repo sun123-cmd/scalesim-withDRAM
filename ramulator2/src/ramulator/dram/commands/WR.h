@@ -9,7 +9,7 @@ namespace Ramulator::Cmd {
 
 template <class T>
 struct WR {
-  static constexpr DRAMCommandMeta meta = {.is_accessing = true};
+  static constexpr DRAMCommandMeta meta = {.is_accessing = true, .preq_bank_row_only = true};
   static constexpr BankTarget bank_target = BankTarget::Single;
 
   static int preq(DRAMNode* bank, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {

@@ -50,6 +50,9 @@ struct DRAMCommandMeta {
   bool is_refreshing = false;
   bool is_row_command = false;     // Row bus (HBM/HBM2: ACT, PREpb, PREab, REFab, REFpb)
   bool is_column_command = false;  // Column bus (HBM/HBM2: RD, WR, RDA, WRA)
+  // Opt-in contract: prerequisite resolution depends only on the addressed
+  // bank's state and row, never on time or other address levels.
+  bool preq_bank_row_only = false;
 };
 
 // Timing Constraint

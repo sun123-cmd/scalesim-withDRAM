@@ -29,7 +29,10 @@ class ControllerBase : public IController, public Implementation {
 
   // Forwarding methods — bind m_clk for sub-components
   bool check_timing(int command, const AddrVec_t& addr_vec);
+  bool check_timing(const Request& request);
   int get_preq_command(int command, const AddrVec_t& addr_vec);
+  int get_preq_command(const Request& request);
+  int get_request_bank_id(const Request& request) const;
 
   // IController overrides
   void set_channel_id(int channel_id) override;
