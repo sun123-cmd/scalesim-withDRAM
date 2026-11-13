@@ -1,10 +1,10 @@
-"""Deterministic batched bound search over online simulation results.
+"""Bound search with a bounded rolling window of online simulations.
 
 Bounds use seconds. Certificates require an admissible cost table and a complete
 candidate space. The equivalence audit finishes all candidates that could enter
 the requested 2% sets or the latency optimum under the 10% throughput constraint.
 """
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict
 import hashlib
 import itertools
@@ -141,36 +141,55 @@ def _search(candidates, evaluator, workers=150, batch_size=150, error_margin=0.0
         return (low_s <= best_s['S'] * 1.02
                 or (low_s <= best_s['S'] * 1.1 and low_l <= best_l['L'] * 1.02))
 
+    def needs_primary(candidate, frontier, best_s):
+        if best_s is None:
+            return True
+        low_l, low_s = bounds(candidate)
+        low_l, low_s = low_l * factor, low_s * factor
+        if mode == 'throughput':
+            return low_s < best_s['S']
+        return not any(dominates((point['L'], point['S']), (low_l, low_s))
+                       for point in frontier)
+
+    # Reserve evaluation budget when submitting, not only when results arrive.
+    # Avoid queuing work inside the executor: new bounds can then prune candidates
+    # before they start. batch_size remains an upper bound on concurrent work.
+    window = min(workers, batch_size)
+    in_flight = {}
+    errors = []
+    order = {candidate['id']: index for index, candidate in enumerate(ordered)}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         while True:
             pending = [candidate for candidate in ordered if candidate['id'] not in evaluated]
-            if not pending:
-                break
             frontier, best_s, best_l, _, _ = _selections(evaluated)
-            if phase == 'primary' and best_s is not None:
-                if mode == 'throughput':
-                    stop = pending[0]['optimistic_s'] * factor >= best_s['S']
-                else:
-                    stop = all(any(point['L'] <= candidate['optimistic_l'] * factor
-                                   and point['S'] <= candidate['optimistic_s'] * factor
-                                   and (point['L'] < candidate['optimistic_l'] * factor
-                                        or point['S'] < candidate['optimistic_s'] * factor)
-                                   for point in frontier) for candidate in pending)
-                if stop:
-                    primary_reason = 'throughput_bound' if mode == 'throughput' else 'pareto_bound'
-                    phase = 'equivalence_audit'
-            if phase == 'equivalence_audit':
-                pending = [candidate for candidate in pending if can_enter_requested_sets(candidate, best_s, best_l)]
-                if not pending:
-                    break
-            remaining_budget = len(pending) if max_evaluations is None else max_evaluations - len(evaluated)
-            if remaining_budget <= 0:
-                budget_exhausted = True
+            if pending and phase == 'primary' and best_s is not None and not any(
+                    needs_primary(candidate, frontier, best_s) for candidate in pending):
+                primary_reason = 'throughput_bound' if mode == 'throughput' else 'pareto_bound'
+                phase = 'equivalence_audit'
+
+            active_ids = {candidate['id'] for candidate in in_flight.values()}
+            eligible = [candidate for candidate in pending if candidate['id'] not in active_ids
+                        and (best_s is None
+                             or (phase == 'primary' and needs_primary(candidate, frontier, best_s))
+                             or can_enter_requested_sets(candidate, best_s, best_l))]
+            # Revisit unsubmitted candidates after every completion. In particular,
+            # a faster throughput optimum can exclude the previous constrained
+            # latency optimum, making an earlier 2% rejection eligible again.
+            remaining_budget = (len(eligible) if max_evaluations is None else
+                                max_evaluations - len(evaluated) - len(in_flight))
+            if not errors:
+                for candidate in eligible[:max(0, min(window - len(in_flight), remaining_budget))]:
+                    in_flight[pool.submit(evaluator, candidate)] = candidate
+            if not in_flight:
+                if errors:
+                    identifier, error = errors[0]
+                    raise SearchEvaluationError(f'Online evaluation failed for {identifier}: {error}') from error
+                budget_exhausted = bool(eligible and remaining_budget <= 0)
                 break
-            selected = pending[:min(batch_size, remaining_budget)]
-            futures = [(candidate, pool.submit(evaluator, candidate)) for candidate in selected]
-            errors = []
-            for candidate, future in futures:
+
+            completed, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in sorted(completed, key=lambda future: order[in_flight[future]['id']]):
+                candidate = in_flight.pop(future)
                 identifier = candidate['id']
                 try:
                     result = json.loads(_json(future.result()))
@@ -195,9 +214,8 @@ def _search(candidates, evaluator, workers=150, batch_size=150, error_margin=0.0
                     state['failures'][identifier] = {'type': type(error).__name__, 'message': str(error)}
                     errors.append((identifier, error))
                 _save(resume_path, state)
-            if errors:
-                identifier, error = errors[0]
-                raise SearchEvaluationError(f'Online evaluation failed for {identifier}: {error}') from error
+            # On an evaluation failure stop submitting, but collect/checkpoint
+            # every already-started result before reporting the error.
     frontier, best_s, best_l, s_equivalent, l_equivalent = _selections(evaluated)
     remaining = [candidate for candidate in ordered if candidate['id'] not in evaluated]
     certified = (candidate_space_complete and not budget_exhausted and not state['failures']
@@ -221,7 +239,7 @@ def _search(candidates, evaluator, workers=150, batch_size=150, error_margin=0.0
 def search(candidates, evaluator, workers=150, batch_size=150, error_margin=0.0,
            mode='pareto', resume_path=None, max_evaluations=None,
            candidate_space_complete=True):
-    """Run batched search with exclusive ownership of its atomic checkpoint."""
+    """Run rolling search with exclusive ownership of its atomic checkpoint."""
     arguments = (candidates, evaluator, workers, batch_size, error_margin, mode,
                  resume_path, max_evaluations, candidate_space_complete)
     if resume_path is None:

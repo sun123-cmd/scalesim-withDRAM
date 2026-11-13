@@ -1,8 +1,11 @@
 """Bound search is cross-checked against exhaustive online-result fixtures."""
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
 from online_search import SearchEvaluationError, enumerate_candidates, search
 from proposal_config import Hardware
@@ -20,6 +23,149 @@ def evaluate(candidate):
 
 
 class OnlineSearchTests(unittest.TestCase):
+    def test_fast_result_is_checkpointed_and_refilled_while_first_is_running(self):
+        values = candidates([(0, 0, 3, 3), (0, 0, 2, 2), (0, 0, 1, 1)])
+        release = threading.Event()
+        replacement_started = threading.Event()
+        def evaluator(candidate):
+            if candidate['id'] == '0':
+                if not release.wait(5):
+                    raise RuntimeError('slow evaluator was not released')
+            elif candidate['id'] == '2':
+                replacement_started.set()
+            return evaluate(candidate)
+        with tempfile.TemporaryDirectory() as temporary, ThreadPoolExecutor(max_workers=1) as caller:
+            checkpoint = Path(temporary) / 'checkpoint.json'
+            future = caller.submit(search, values, evaluator, workers=2, batch_size=8,
+                                   resume_path=checkpoint)
+            try:
+                self.assertTrue(replacement_started.wait(3), 'worker waited for the slow batch leader')
+                data = json.loads(checkpoint.read_text())
+                self.assertIn('1', data['evaluated'])
+                self.assertNotIn('0', data['evaluated'])
+            finally:
+                release.set()
+            result = future.result(timeout=3)
+            self.assertEqual(result['evaluated_count'], 3)
+            self.assertEqual(result['throughput_optimum']['id'], '2')
+
+    def test_failure_stops_refills_but_checkpoints_inflight_success_for_resume(self):
+        import online_search
+        values = candidates([(0, 0, 1, 1), (0, 0, 2, 2), (0, 0, 3, 3)])
+        release = threading.Event()
+        failure_saved = threading.Event()
+        calls = []
+        def evaluator(candidate):
+            calls.append(candidate['id'])
+            if candidate['id'] == '0':
+                if not release.wait(5):
+                    raise RuntimeError('slow evaluator was not released')
+            elif candidate['id'] == '1':
+                raise RuntimeError('native execution failed')
+            return evaluate(candidate)
+        original_save = online_search._save
+        def save(path, state):
+            original_save(path, state)
+            if state['failures']:
+                failure_saved.set()
+        with tempfile.TemporaryDirectory() as temporary, ThreadPoolExecutor(max_workers=1) as caller:
+            checkpoint = Path(temporary) / 'checkpoint.json'
+            with patch('online_search._save', side_effect=save):
+                future = caller.submit(search, values, evaluator, workers=2, batch_size=8,
+                                       resume_path=checkpoint)
+                try:
+                    self.assertTrue(failure_saved.wait(3))
+                    self.assertEqual(set(calls), {'0', '1'})
+                finally:
+                    release.set()
+                with self.assertRaisesRegex(SearchEvaluationError, 'native execution failed'):
+                    future.result(timeout=3)
+            data = json.loads(checkpoint.read_text())
+            self.assertEqual(set(data['evaluated']), {'0'})
+            self.assertEqual(set(data['failures']), {'1'})
+            retried = []
+            def resume(candidate):
+                retried.append(candidate['id'])
+                return evaluate(candidate)
+            result = search(values, resume, workers=2, resume_path=checkpoint)
+            self.assertEqual(set(retried), {'1', '2'})
+            self.assertEqual(result['evaluated_count'], 3)
+            self.assertEqual(json.loads(checkpoint.read_text())['failures'], {})
+
+    def test_inflight_budget_reservation_prevents_refill_overshoot(self):
+        values = candidates([(0, 0, 2, 2)] * 6)
+        calls = []
+        def evaluator(candidate):
+            calls.append(candidate['id'])
+            return evaluate(candidate)
+        result = search(values, evaluator, workers=2, batch_size=8, max_evaluations=3)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result['evaluated_count'], 3)
+        self.assertEqual(result['stopping_reason'], 'evaluation_budget')
+
+    def test_pruning_does_not_discard_already_started_results(self):
+        values = candidates([(0, 0, 20, 20), (1, 1, 2, 2), (10, 10, 30, 30)])
+        release = threading.Event()
+        saved_fast = threading.Event()
+        calls = []
+        import online_search
+        original_save = online_search._save
+        def evaluator(candidate):
+            calls.append(candidate['id'])
+            if candidate['id'] == '0' and not release.wait(5):
+                raise RuntimeError('slow evaluator was not released')
+            return evaluate(candidate)
+        def save(path, state):
+            original_save(path, state)
+            if '1' in state['evaluated']:
+                saved_fast.set()
+        with ThreadPoolExecutor(max_workers=1) as caller, patch('online_search._save', side_effect=save):
+            future = caller.submit(search, values, evaluator, workers=2, batch_size=2)
+            try:
+                self.assertTrue(saved_fast.wait(3))
+                self.assertNotIn('2', calls)
+            finally:
+                release.set()
+            result = future.result(timeout=3)
+        self.assertEqual({x['id'] for x in result['evaluated']}, {'0', '1'})
+        self.assertEqual([x['id'] for x in result['pareto_frontier']], ['1'])
+        self.assertEqual(result['bound_certificate'], 'exact')
+
+    def test_throughput_improvement_revisits_previously_ineligible_latency_candidate(self):
+        import online_search
+        values = candidates([(0, 0, 100, 10), (1, 1, 100, 9.9),
+                             (1, 2, 1, 10.9), (50, 10.8, 50, 10.8)])
+        release = threading.Event()
+        latency_saved = threading.Event()
+        calls = []
+        original_save = online_search._save
+        def save(path, state):
+            original_save(path, state)
+            if '2' in state['evaluated']:
+                latency_saved.set()
+        def evaluator(candidate):
+            calls.append(candidate['id'])
+            if candidate['id'] == '1' and not release.wait(5):
+                raise RuntimeError('slow evaluator was not released')
+            return evaluate(candidate)
+        with tempfile.TemporaryDirectory() as temporary, ThreadPoolExecutor(max_workers=1) as caller:
+            checkpoint = Path(temporary) / 'checkpoint.json'
+            search(values, evaluate, mode='throughput', workers=1, max_evaluations=1,
+                   resume_path=checkpoint)
+            with patch('online_search._save', side_effect=save):
+                future = caller.submit(search, values, evaluator, mode='throughput', workers=2,
+                                       batch_size=2, resume_path=checkpoint)
+                try:
+                    self.assertTrue(latency_saved.wait(3))
+                    self.assertNotIn('3', calls)
+                finally:
+                    release.set()
+                result = future.result(timeout=3)
+        self.assertEqual(result['throughput_optimum']['id'], '1')
+        self.assertEqual(result['latency_optimum_within_10_percent_S']['id'], '3')
+        self.assertEqual([x['id'] for x in result['latency_equivalent_2_percent']], ['3'])
+        self.assertTrue(result['equivalence_sets_complete'])
+
     def test_error_margin_preserves_latency_tradeoff(self):
         values = candidates([(1, 1, 10, 10), (9.1, 20, 9.2, 21)])
         result = search(values, evaluate, batch_size=1, error_margin=.1)
@@ -171,6 +317,9 @@ class OnlineSearchTests(unittest.TestCase):
                     self.assertEqual({item['id'] for item in result['pareto_frontier']}, expected_pareto)
                 self.assertEqual({item['id'] for item in result['throughput_equivalent_2_percent']},
                                  {str(index) for index, row in enumerate(rows) if row[3] <= best_s * 1.02})
+                self.assertEqual({item['id'] for item in result['latency_equivalent_2_percent']},
+                                 {str(index) for index, row in enumerate(rows)
+                                  if row[3] <= best_s * 1.1 and row[2] <= best_l * 1.02})
 
     def test_checkpoint_exclusive_lock(self):
         import fcntl
